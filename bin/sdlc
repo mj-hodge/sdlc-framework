@@ -1,0 +1,1400 @@
+#!/bin/bash
+# sdlc — CLI tool for the SDLC Framework
+# Manages AI-assisted development configuration across projects.
+
+set -euo pipefail
+
+# --- Resolve install location dynamically ---
+resolve_sdlc_dir() {
+  local source="${BASH_SOURCE[0]}"
+  # Resolve symlinks
+  while [ -L "$source" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    # Handle relative symlinks
+    [[ "$source" != /* ]] && source="$dir/$source"
+  done
+  local bin_dir
+  bin_dir="$(cd -P "$(dirname "$source")" && pwd)"
+  echo "$(dirname "$bin_dir")"
+}
+
+SDLC_DIR="$(resolve_sdlc_dir)"
+
+# --- Color support ---
+if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+  GREEN=$(tput setaf 2)
+  RED=$(tput setaf 1)
+  YELLOW=$(tput setaf 3)
+  CYAN=$(tput setaf 6)
+  BOLD=$(tput bold)
+  RESET=$(tput sgr0)
+else
+  GREEN="" RED="" YELLOW="" CYAN="" BOLD="" RESET=""
+fi
+
+pass()  { echo "  ${GREEN}✓${RESET} $*"; }
+fail()  { echo "  ${RED}✗${RESET} $*"; }
+warn()  { echo "  ${YELLOW}!${RESET} $*"; }
+info()  { echo "${CYAN}→${RESET} $*"; }
+header() { echo "${BOLD}$*${RESET}"; }
+
+# --- Version ---
+get_version() {
+  if [ -f "$SDLC_DIR/VERSION" ]; then
+    cat "$SDLC_DIR/VERSION" | tr -d '[:space:]'
+  else
+    echo "dev"
+  fi
+}
+
+# =============================================================================
+# File generation — MUST match setup-project.sh output exactly
+# =============================================================================
+
+generate_claude_md() {
+  local target="$1/CLAUDE.md"
+  cat > "$target" << 'CLAUDE_EOF'
+# CLAUDE.md
+
+> **DIRECTIVE:** This file contains critical guidance that MUST be followed for all work.
+> After context compaction, re-read this file and `.project` to restore phase context.
+
+---
+
+## SDLC Process (REQUIRED)
+
+**Every request to spec, design, or build MUST follow the phased process. No exceptions.**
+
+**"spec" trigger:** Any prompt starting with "spec" MUST initiate the SDLC process starting at Phase 1 (Seed). Treat "spec ..." as equivalent to `/phase-1 ...`. When `multi_worker: true`, spec also auto-runs `/start-story` after Phase 1 (claim + worktree + Story Status row) — one command spins up a full workstream.
+
+1. Read the agent persona from `agents/phase-X-*.md` (via AGENTS.md)
+2. Adopt that persona's role and approach
+3. Produce the deliverables for that phase
+4. Update `.project`, `backlog.md`, and task tracker
+5. Hand off to next phase based on scope
+
+**Phase paths:**
+
+| Scope | Path |
+|-------|------|
+| Trivial | → 8 → Done |
+| Small | 1 → 7 → 8 → Done |
+| Medium | 1 → 4 → 6 → [6b, 6c, 6d] → 7 → 8 → 8b → 11 → Done |
+| Large/New | 1 → 2 → 3 → 4 → 5 → 6 → [6b, 6c, 6d] → 7 → 8 → 8b → 11 → [9, 10] → Done |
+
+**Code gates:** No implementation code until Phase 8. Tests must be RED before Phase 8 starts.
+**Test integrity:** When tests fail in Phase 8, fix the code — not the tests. Tests may only be modified if they don't match the Phase 6/7 spec (document the reason, which spec it conflicted with, and what was changed).
+
+**Phase boundary behavior (CRITICAL — do NOT auto-advance):**
+Each agent persona has an `advance` field. After completing a phase, you MUST check it:
+
+| Advance | Behavior | Phases |
+|---------|----------|--------|
+| **gate** | **STOP.** Show deliverables. Wait for explicit user approval before doing anything else. Do NOT start the next phase. | 1, 8 |
+| **confirm** | **STOP.** Show summary. Ask "Proceed to Phase X?" Wait for yes/no. | 2, 3, 4, 5, 6, 7, 9, 10 |
+| **auto** | Proceed to the next **phase** immediately, no user input needed. | 6b, 6c, 8b |
+
+**You must STOP and wait after every phase unless the advance category is `auto`.** Never chain phases together. The user decides when to continue.
+
+**Story switching (CRITICAL — NEVER auto-switch stories, even with auto-accept):**
+`auto` advance means auto-advance to the next **phase within the same story**. It NEVER means switch to a different story/ticket. When a story is complete (final phase reached, tracker/backlog updated):
+1. Output the completion summary
+2. **STOP. END YOUR RESPONSE. Do NOT claim, start, or begin the next story.**
+3. The "Next:" suggestions in completion messages are for the **user to read and type** — they are NOT instructions for you to execute
+4. Wait for the user to explicitly tell you which story to work on next
+5. This rule applies even if there are Ready stories in the backlog — you do NOT pick them up automatically
+6. This rule applies even if auto-accept is enabled — auto-accept controls phase transitions, NEVER story transitions
+
+**Parallel processing (DEFAULT):** When multiple stories exist, batch non-conflicting stories and run them in parallel using worktree-isolated Task subagents. Each agent follows the full SDLC path for its scope. Sequential is the fallback, not the norm. See [software-development-guidance.md](.sdlc/software-development-guidance.md) § Parallel Backlog Processing.
+
+**Multi-worker mode:** When `orchestration.multi_worker: true`, multiple workers (humans, AI sessions) advance different stories simultaneously. Each story gets a worktree for all phases. Use `/next STORY-ID` to advance a specific story, `/next --claim` to pick up the next unclaimed story. See [software-development-guidance.md](.sdlc/software-development-guidance.md) § Multi-Worker Protocol.
+
+**Full phase details:** See [software-development-guidance.md](.sdlc/software-development-guidance.md)
+**Agent personas:** See [AGENTS.md](./AGENTS.md)
+
+---
+
+## Deliverable Location (REQUIRED)
+
+**All phase deliverables MUST be written to:** `features/<story-folder>/`
+
+**Folder naming:** `features/story-XXX-kebab-case-slug/` where XXX is the story number and slug is derived from the task tracker name.
+
+Example: `features/story-014-str-automations/seed.md`
+
+**NEVER write deliverables to the project root or a `docs/` directory.** The `features/` directory is the single source of truth for all SDLC artifacts.
+
+**Multi-worker mode:** When using worktrees, deliverables still go in `features/<story-folder>/` within the worktree.
+
+---
+
+## Phase Deliverables (REQUIRED — every phase MUST produce its file)
+
+All files below are written to `features/<story-folder>/`:
+
+| Phase | Output File(s) | Scope |
+|-------|---------------|-------|
+| 1 | `seed.md` | All |
+| 2 | `research.md` | Large/New |
+| 3 | `expansion.md` | Large/New |
+| 4 | `analysis.md` | Medium+ |
+| 5 | `selection.md` | Large/New |
+| 6 | `feature-spec.md` (Medium) OR `specification.md`, `architecture.md`, `api-design.md`, `database-schema.md`, `implementation-plan.md` (Large/New) | Medium+ |
+| 6b | `security-review.md` | Medium+ |
+| 6c | `ux-review.md` | Medium+ |
+| 7 | `test-design.md` + runnable test code in `tests/`/`e2e/` (RED state) | All |
+| 8 | Implementation code (all tests GREEN) | All |
+| 8b | `code-review.md` | Medium+ |
+| 11 | `predeploy-gate.md` | Medium+ |
+| 9 | `refinement-report.md` | Large/New |
+| 10 | `site-reliability.md` | Large/New |
+
+**Every phase MUST also update:** `.project`, `backlog.md`, `development-tasks.md`, task tracker (add comment summarizing work)
+
+**A phase is NOT complete until its output file exists in `features/<story-folder>/` and tracking docs are updated.**
+
+---
+
+## Model Policy (CRITICAL)
+
+| Phase | Model | Effort |
+|-------|-------|--------|
+| 1 (Seed) | Opus (always) | high |
+| 2-5 | Sonnet (default), Opus for large/complex | medium |
+| 6 (Design) | Opus (default), Sonnet ok for small | high |
+| 7 (Test Design) | Sonnet (default) | medium |
+| 8 (Implementation) | Sonnet (default), Opus requires approval | medium |
+| 8b (Code Review) | Sonnet (default) | medium |
+| 11 (Pre-Deploy Gate) | Sonnet (default) | medium |
+| 9 (Refinement) | Opus (always) | high |
+| 10 (Operations) | Opus (always) | high |
+
+**Orchestrated phases (sub-agents run in parallel, orchestrator synthesizes):**
+- **2 (Research):** market-scout (Sonnet, low), library-miner (Sonnet, low), field-reporter (Sonnet, low)
+- **3 (Expansion):** pragmatist (Sonnet, medium), futurist (Sonnet, medium), optimizer (Sonnet, medium)
+- **4 (Analysis):** technical (Sonnet, medium), business (Sonnet, medium), risk (Sonnet, medium)
+- **8b (Code Review):** architect (Opus, high), skeptic (Sonnet, medium), simplifier (Sonnet, low), rule-reviewer (Sonnet, low), qa (Sonnet, low, frontend only), browser-tester (Sonnet, medium, frontend only)
+
+**Subagents:** Use Sonnet with `effort: low` for research and review subagents. Use Sonnet with `effort: medium` for complex subagent tasks.
+
+**Model Enforcement (HARD GATE — no exceptions):**
+- Before starting ANY phase work, check: does your current model match the phase's required model?
+- **Opus doing Sonnet work (e.g., Phase 8):** You MUST NOT write implementation code directly. Delegate ALL work to Task subagents with `model: "sonnet"`. The Opus agent orchestrates only — dispatches tasks, verifies results, commits code. This prevents ~15x cost overrun.
+- **Sonnet doing Opus work (e.g., Phase 1, 9, 10):** Delegate ALL work to a Task subagent with `model: "opus"`. Sonnet orchestrates only — dispatches, verifies, commits. The user should NEVER be asked to manually switch models.
+- **Orchestrated phases (2, 3, 4, 8b):** The orchestrator MUST specify `model: "sonnet"` (or `model: "opus"` for 8b-architect) on every Task subagent launch. Never inherit the orchestrator's model.
+- **config.yaml override:** If `models.opus_allowed: true`, Opus may do Sonnet-default phases directly. This is the ONLY exception.
+- Each agent persona file contains a Model Gate section — read it before starting work.
+
+---
+
+## Context Management (CRITICAL)
+
+- `/clear` between context groups, not every phase (default: `grouped` strategy)
+- Use `/next` to auto-determine when `/clear` is needed
+- Use subagents for research (Phases 2-3) — never pollute main context
+- After 2 failed corrections, `/clear` and restart with a better prompt
+- Commit after each logical unit in Phase 8
+- Never implement more than one function/endpoint per prompt
+
+**Compaction:** When compacting, always preserve: modified files list, current phase & status, test commands, key file paths, and pending decisions.
+
+**Context groups:** Seed | Research (2,3) | Evaluation (4,5) | Design (6,[6b,6c,6d]) | Test (7) | Implementation (8,8b) | Deploy (11) | Polish ([9,10])
+
+**After `/clear` — "continue", "next step", or `/next`:**
+1. Read `.project` → Phase Routing section to find current phase and status
+2. Read the agent persona for that phase
+3. Begin or resume the phase — no re-explanation needed
+
+---
+
+## Task Tracker
+
+**Read `config.yaml` → `task_tracker.platform` to determine which tracker this project uses.**
+
+**Tracker-specific commands and setup:** Read the tracker guide at `~/.sdlc/trackers/<platform>.md` (e.g., `~/.sdlc/trackers/asana.md` or `~/.sdlc/trackers/monday.md`). Follow its instructions for API commands, MCP setup, and board structure.
+
+**Project naming:** `sdlc-<directory-name>`
+
+**Required columns/sections (all trackers):** Backlog → Ready → In Progress → E2E Gate → Done | Do Not Do (ignored by agents)
+
+**Epic hierarchy:**
+- **Epic parent task:** `EPIC: <name>`
+- **Story subtasks:** `[E-1] STORY-XXX: <name>` — prefixed with epic delivery phase number
+- **E2E gate stories:** `[E2E] STORY-XXX: <name>`
+- Non-epic stories: `STORY-XXX: <name>` (no prefix, no parent)
+
+**Phase progress tracking:** Every phase transition MUST update the task tracker with an SDLC Progress block showing completed/current/remaining phases. See `/next` skill § Phase Progress Format.
+
+---
+
+## Skills
+
+| Skill | Purpose |
+|-------|---------|
+| `/spec` | SDLC entry point — start Phase 1 for new work |
+| `/new-project` | Full project setup |
+| `/phase-1` | Concept & Seed |
+| `/phase-2` | Research Coordinator |
+| `/phase-3` | Expansion Coordinator |
+| `/phase-4` | Analysis Coordinator |
+| `/phase-5` | Pragmatic Executive |
+| `/phase-6` | Systems Architect |
+| `/phase-6b` | Security Reviewer |
+| `/phase-6c` | UX Review |
+| `/phase-7` | Test Design |
+| `/phase-8` | Implementation |
+| `/phase-8b` | Code Review |
+| `/phase-9` | Refinement |
+| `/phase-10` | Operational Resilience |
+| `/next` | Advance to next phase (auto/confirm/gate) |
+| `/sync-backlog` | Sync tracker → backlog.md |
+| `/start-story` | Begin story work |
+| `/complete-story` | Mark story done |
+| `/council` | LLM Council review |
+
+---
+
+## Git
+
+**Commit format:** `phase <N>: <description>`
+
+**Feature updates:** `phase <N>: [feature-name] <description>`
+
+**Check-in command (REQUIRED):** `gci-safe "<commit message>"`
+
+---
+
+## Tech Stack (Default)
+
+- **Backend:** Python 3.12+, FastAPI, PostgreSQL, SQLAlchemy 2.0, Alembic, Pydantic, PyJWT, pwdlib, pytest
+- **Frontend:** React 19, Vite, TypeScript, Tailwind v4, TanStack Query v5, Zustand v5, Zod v4
+- **Frontend testing:** Playwright (all UI verification). **NEVER use curl/HTTP to check frontend behavior** — curl tests the API, not what users see. If it's user-facing, use Playwright or a browser tool. **Always run headless** (`headless: true` in playwright.config.ts). Never use `--headed`, `--debug`, or `--ui` flags.
+- **Test timeouts:** All test runners MUST enforce a 15 s per-test timeout. pytest: `timeout = 15` in pyproject.toml (requires `pytest-timeout`). Playwright: `timeout: 15000` in playwright.config.ts. Vitest: `testTimeout: 15000` in vitest.config.ts.
+- **Infra:** Docker, Docker Compose
+
+---
+
+## Writing Rules
+
+- Bullets over prose
+- Tables for structured data
+- No filler words
+- Max 3 nesting levels
+
+---
+
+## Reference
+
+- [software-development-guidance.md](.sdlc/software-development-guidance.md) — Full phase details, gates, hooks, lessons learned
+- [AGENTS.md](./AGENTS.md) — Complete agent guidance with examples
+- [templates/](.sdlc/templates/) — File and config templates
+CLAUDE_EOF
+}
+
+generate_gemini_md() {
+  local target="$1/GEMINI.md"
+  cat > "$target" << 'GEMINI_EOF'
+# GEMINI.md
+
+> **DIRECTIVE:** This file contains critical guidance that MUST be followed for all work.
+> After context compaction, re-read this file and `.project` to restore phase context.
+> Read and follow [AGENTS.md](./AGENTS.md) for complete development guidance.
+
+---
+
+## SDLC Process (REQUIRED)
+
+**Every request to spec, design, or build MUST follow the phased process. No exceptions.**
+
+**"spec" trigger:** Any prompt starting with "spec" MUST initiate the SDLC process starting at Phase 1 (Seed). When `multi_worker: true`, spec also auto-runs the start-story protocol after Phase 1 (claim + worktree) — one command spins up a full workstream.
+
+1. Start with Phase 1 (Business Analyst persona)
+2. Classify scope: trivial | small | medium | large | new_project
+3. Follow the phase path based on scope
+4. Adopt each agent persona from `.sdlc/agents/phase-X-*.md`
+5. Produce the deliverables for that phase
+6. Update `.project`, `backlog.md`, and task tracker
+7. **STOP after each phase** — check the advance category before continuing (see below)
+
+**Phase paths:**
+
+| Scope | Path |
+|-------|------|
+| Trivial | → 8 → Done |
+| Small | 1 → 7 → 8 → Done |
+| Medium | 1 → 4 → 6 → [6b, 6c, 6d] → 7 → 8 → 8b → 11 → Done |
+| Large/New | 1 → 2 → 3 → 4 → 5 → 6 → [6b, 6c, 6d] → 7 → 8 → 8b → 11 → [9, 10] → Done |
+
+**Code gates:** No implementation code until Phase 8. Tests must be RED before Phase 8 starts.
+**Test integrity:** When tests fail in Phase 8, fix the code — not the tests. Tests may only be modified if they don't match the Phase 6/7 spec (document the reason, which spec it conflicted with, and what was changed).
+
+**Phase boundary behavior (CRITICAL — do NOT auto-advance):**
+Each agent persona has an `advance` field. After completing a phase, you MUST check it:
+
+| Advance | Behavior | Phases |
+|---------|----------|--------|
+| **gate** | **STOP.** Show deliverables. Wait for explicit user approval before doing anything else. Do NOT start the next phase. | 1, 8 |
+| **confirm** | **STOP.** Show summary. Ask "Proceed to Phase X?" Wait for yes/no. | 2, 3, 4, 5, 6, 7, 9, 10 |
+| **auto** | Proceed to the next **phase** immediately, no user input needed. | 6b, 6c, 8b |
+
+**You must STOP and wait after every phase unless the advance category is `auto`.** Never chain phases together. The user decides when to continue.
+
+**Story switching (CRITICAL — NEVER auto-switch stories, even with auto-accept):**
+`auto` advance means auto-advance to the next **phase within the same story**. It NEVER means switch to a different story/ticket. When a story is complete (final phase reached, tracker/backlog updated):
+1. Output the completion summary
+2. **STOP. END YOUR RESPONSE. Do NOT claim, start, or begin the next story.**
+3. The "Next:" suggestions in completion messages are for the **user to read and type** — they are NOT instructions for you to execute
+4. Wait for the user to explicitly tell you which story to work on next
+5. This rule applies even if there are Ready stories in the backlog — you do NOT pick them up automatically
+6. This rule applies even if auto-accept is enabled — auto-accept controls phase transitions, NEVER story transitions
+
+**Parallel processing (DEFAULT):** When multiple stories exist, batch non-conflicting stories and run them in parallel. Sequential is the fallback, not the norm. See [software-development-guidance.md](.sdlc/software-development-guidance.md) § Parallel Backlog Processing.
+
+**Multi-worker mode:** When `orchestration.multi_worker: true`, multiple workers (humans, AI sessions) advance different stories simultaneously. Each story gets a worktree for all phases. Use `next STORY-ID` to advance a specific story, `next --claim` to pick up the next unclaimed story. See [software-development-guidance.md](.sdlc/software-development-guidance.md) § Multi-Worker Protocol.
+
+**Full phase details:** See [software-development-guidance.md](.sdlc/software-development-guidance.md)
+**Agent personas:** See [AGENTS.md](./AGENTS.md)
+
+---
+
+## Deliverable Location (REQUIRED)
+
+**All phase deliverables MUST be written to:** `features/<story-folder>/`
+
+**Folder naming:** `features/story-XXX-kebab-case-slug/` where XXX is the story number and slug is derived from the task tracker name.
+
+Example: `features/story-014-str-automations/seed.md`
+
+**NEVER write deliverables to the project root or a `docs/` directory.** The `features/` directory is the single source of truth for all SDLC artifacts.
+
+**Multi-worker mode:** When using worktrees, deliverables still go in `features/<story-folder>/` within the worktree.
+
+---
+
+## Phase Deliverables (REQUIRED — every phase MUST produce its file)
+
+All files below are written to `features/<story-folder>/`:
+
+| Phase | Output File(s) | Scope |
+|-------|---------------|-------|
+| 1 | `seed.md` | All |
+| 2 | `research.md` | Large/New |
+| 3 | `expansion.md` | Large/New |
+| 4 | `analysis.md` | Medium+ |
+| 5 | `selection.md` | Large/New |
+| 6 | `feature-spec.md` (Medium) OR `specification.md`, `architecture.md`, `api-design.md`, `database-schema.md`, `implementation-plan.md` (Large/New) | Medium+ |
+| 6b | `security-review.md` | Medium+ |
+| 6c | `ux-review.md` | Medium+ |
+| 7 | `test-design.md` + runnable test code in `tests/`/`e2e/` (RED state) | All |
+| 8 | Implementation code (all tests GREEN) | All |
+| 8b | `code-review.md` | Medium+ |
+| 11 | `predeploy-gate.md` | Medium+ |
+| 9 | `refinement-report.md` | Large/New |
+| 10 | `site-reliability.md` | Large/New |
+
+**Every phase MUST also update:** `.project`, `backlog.md`, `development-tasks.md`, task tracker (add comment summarizing work)
+
+**A phase is NOT complete until its output file exists in `features/<story-folder>/` and tracking docs are updated.**
+
+---
+
+## Context Management (CRITICAL)
+
+- Clear context between context groups, not every phase (default: grouped strategy)
+- Use separate searches for research (Phases 2-3) — don't pollute main context
+- After 2 failed corrections, start a new session with a better prompt
+- Commit after each logical unit in Phase 8
+- Never implement more than one function/endpoint per prompt
+
+**Context groups:** Seed | Research (2,3) | Evaluation (4,5) | Design (6,[6b,6c,6d]) | Test (7) | Implementation (8,8b) | Deploy (11) | Polish ([9,10])
+
+**After clearing context — "continue" or "next step":**
+1. Read `.project` → Phase Routing section to find current phase and status
+2. Read the agent persona for that phase
+3. Begin or resume the phase — no re-explanation needed
+
+---
+
+## Skills
+
+All phases and orchestration tasks are available as skills. Use `activate_skill` to load a phase's instructions.
+
+| Skill | Phase / Purpose |
+|-------|-----------------|
+| `spec` | SDLC entry point — start Phase 1 for new work |
+| `phase-1` | Concept & Seed |
+| `phase-2` | Research Coordinator |
+| `phase-3` | Expansion Coordinator |
+| `phase-4` | Analysis Coordinator |
+| `phase-5` | Pragmatic Executive |
+| `phase-6` | Systems Architect |
+| `phase-6b` | Security Reviewer |
+| `phase-6c` | UX Strategist |
+| `phase-7` | Principal Developer |
+| `phase-8` | Senior Developer |
+| `phase-8b` | Code Review Orchestrator |
+| `phase-9` | Distinguished Engineer |
+| `phase-10` | Operational Resilience |
+| `next` | Advance to next phase |
+| `sync-backlog` | Sync tracker → backlog.md |
+| `start-story` | Begin story work (claim + worktree) |
+| `complete-story` | Mark story done (merge + cleanup) |
+| `council` | Invoke LLM Council |
+
+---
+
+## Model Policy (CRITICAL)
+
+| Phase | Model | Effort |
+|-------|-------|--------|
+| 1 (Seed) | Pro (always) | high |
+| 2-5 | Flash (default), Pro for large/complex | medium |
+| 6 (Design) | Pro (default), Flash ok for small | high |
+| 7 (Test Design) | Flash (default) | medium |
+| 8 (Implementation) | Flash (default) | medium |
+| 8b (Code Review) | Flash (default) | medium |
+| 11 (Pre-Deploy Gate) | Flash (default) | medium |
+| 9 (Refinement) | Pro (always) | high |
+| 10 (Operations) | Pro (always) | high |
+
+**Model Enforcement (HARD GATE — no exceptions):**
+- Before starting ANY phase, check: does your current model match the phase's required model?
+- **Pro doing Flash work (e.g., Phase 8):** Delegate ALL work to Flash. Pro orchestrates only.
+- **Flash doing Pro work (e.g., Phase 1, 9, 10):** Delegate ALL work to a Pro sub-agent. Never ask the user to switch models.
+
+---
+
+## Task Tracker
+
+**Read `config.yaml` → `task_tracker.platform` to determine which tracker this project uses.**
+
+**Tracker-specific commands and setup:** Read the tracker guide at `~/.sdlc/trackers/<platform>.md` (e.g., `~/.sdlc/trackers/asana.md` or `~/.sdlc/trackers/monday.md`). Follow its instructions for API commands, MCP setup, and board structure.
+
+**Project naming:** `sdlc-<directory-name>`
+
+**Required columns/sections (all trackers):** Backlog → Ready → In Progress → E2E Gate → Done | Do Not Do (ignored by agents)
+
+**Epic hierarchy:**
+- **Epic parent task:** `EPIC: <name>`
+- **Story subtasks:** `[E-1] STORY-XXX: <name>` — prefixed with epic delivery phase number
+- **E2E gate stories:** `[E2E] STORY-XXX: <name>`
+- Non-epic stories: `STORY-XXX: <name>` (no prefix, no parent)
+
+**Phase progress tracking:** Every phase transition MUST update the task tracker with an SDLC Progress block showing completed/current/remaining phases.
+
+---
+
+## Git
+
+**Commit format:** `phase <N>: <description>`
+
+**Feature updates:** `phase <N>: [feature-name] <description>`
+
+**Check-in command (REQUIRED):** `gci-safe "<commit message>"`
+
+---
+
+## Tech Stack (Default)
+
+- **Backend:** Python 3.12+, FastAPI, PostgreSQL, SQLAlchemy 2.0, Alembic, Pydantic, PyJWT, pwdlib, pytest
+- **Frontend:** React 19, Vite, TypeScript, Tailwind v4, TanStack Query v5, Zustand v5, Zod v4
+- **Frontend testing:** Playwright (all UI verification). **NEVER use curl/HTTP to check frontend behavior** — curl tests the API, not what users see. If it's user-facing, use Playwright or a browser tool. **Always run headless** (`headless: true` in playwright.config.ts). Never use `--headed`, `--debug`, or `--ui` flags.
+- **Test timeouts:** All test runners MUST enforce a 15 s per-test timeout. pytest: `timeout = 15` in pyproject.toml (requires `pytest-timeout`). Playwright: `timeout: 15000` in playwright.config.ts. Vitest: `testTimeout: 15000` in vitest.config.ts.
+- **Infra:** Docker, Docker Compose
+
+---
+
+## Writing Rules
+
+- Bullets over prose
+- Tables for structured data
+- No filler words
+- Max 3 nesting levels
+
+---
+
+## Key Files
+
+`.project` | `config.yaml` | `seed.md` | `backlog.md` | `development-tasks.md`
+
+---
+
+## Reference
+
+- [software-development-guidance.md](.sdlc/software-development-guidance.md) — Full phase details, gates, hooks, lessons learned
+- [AGENTS.md](./AGENTS.md) — Complete agent guidance with examples
+- [templates/](.sdlc/templates/) — File and config templates
+GEMINI_EOF
+}
+
+generate_codex_md() {
+  local target="$1/CODEX.md"
+  cat > "$target" << 'CODEX_EOF'
+# CODEX.md
+
+> **DIRECTIVE:** Follow [AGENTS.md](./AGENTS.md) as the primary SDLC policy.
+> At session start and after context resets, re-read `AGENTS.md`, `config.yaml`, and `.project`.
+
+---
+
+## SDLC Process (Required)
+
+- Treat prompts like "spec ..." as a Phase 1 start.
+- Follow the scope path and phase gates defined in `AGENTS.md`.
+- Read the phase persona from `.sdlc/agents/phase-X-*.md` before each phase.
+- Produce required phase deliverables in `features/<story-folder>/`.
+- Keep `.project`, `backlog.md`, `development-tasks.md`, and task tracker synchronized at every transition.
+
+## Execution Notes For Codex
+
+- Codex does not rely on slash commands; execute the same workflow through plain-language directives.
+- Treat `spec ...` and `/spec ...` as equivalent.
+- Treat `next STORY-XXX` and `/next STORY-XXX` as equivalent.
+- Codex MCP configuration lives in `~/.codex/config.toml` and should be managed via `codex mcp add ...` / `codex mcp list` (not `~/.codex/settings.json`).
+- Use `skills/*/SKILL.md` as procedural references when a phase or workflow is requested.
+- For platform-specific behavior, prefer:
+  - `.sdlc/skills/next/codex.md`
+  - `.sdlc/skills/spec/codex.md`
+- For phase advancement, follow the same `advance` semantics (`gate`, `confirm`, `auto`) from agent personas.
+- Respect model-tier gates in `AGENTS.md` and `config.yaml`.
+
+## Required Files
+
+`AGENTS.md` | `config.yaml` | `.project` | `backlog.md` | `development-tasks.md`
+
+## References
+
+- [AGENTS.md](./AGENTS.md)
+- [software-development-guidance.md](.sdlc/software-development-guidance.md)
+- [agents/README.md](.sdlc/agents/README.md)
+- [skills/](.sdlc/skills/)
+CODEX_EOF
+}
+
+# =============================================================================
+# Commands
+# =============================================================================
+
+cmd_init() {
+  local project_dir="${1:-.}"
+
+  # Resolve to absolute path
+  project_dir="$(cd "$project_dir" 2>/dev/null && pwd)" || {
+    fail "Directory not found: $1"
+    exit 1
+  }
+
+  header "Initializing SDLC in $project_dir"
+  echo ""
+
+  local created=()
+  local existed=()
+
+  # --- Generate CLAUDE.md ---
+  if [ -f "$project_dir/CLAUDE.md" ]; then
+    existed+=("CLAUDE.md")
+  else
+    generate_claude_md "$project_dir"
+    created+=("CLAUDE.md")
+  fi
+
+  # --- Generate GEMINI.md ---
+  if [ -f "$project_dir/GEMINI.md" ]; then
+    existed+=("GEMINI.md")
+  else
+    generate_gemini_md "$project_dir"
+    created+=("GEMINI.md")
+  fi
+
+  # --- Generate CODEX.md ---
+  if [ -f "$project_dir/CODEX.md" ]; then
+    existed+=("CODEX.md")
+  else
+    generate_codex_md "$project_dir"
+    created+=("CODEX.md")
+  fi
+
+  # --- Copy config.yaml ---
+  if [ -f "$project_dir/config.yaml" ]; then
+    existed+=("config.yaml")
+  else
+    if [ -f "$SDLC_DIR/templates/config.yaml" ]; then
+      cp "$SDLC_DIR/templates/config.yaml" "$project_dir/config.yaml"
+      created+=("config.yaml")
+    else
+      warn "config.yaml template not found at $SDLC_DIR/templates/config.yaml"
+    fi
+  fi
+
+  # --- Copy .project ---
+  if [ -f "$project_dir/.project" ]; then
+    existed+=(".project")
+  else
+    if [ -f "$SDLC_DIR/templates/project.md" ]; then
+      cp "$SDLC_DIR/templates/project.md" "$project_dir/.project"
+      created+=(".project")
+    else
+      warn ".project template not found at $SDLC_DIR/templates/project.md"
+    fi
+  fi
+
+  # --- Create symlinks ---
+
+  # AGENTS.md → ~/.sdlc/AGENTS.md
+  if [ -L "$project_dir/AGENTS.md" ] || [ -f "$project_dir/AGENTS.md" ]; then
+    existed+=("AGENTS.md (symlink)")
+  else
+    if [ -f "$SDLC_DIR/AGENTS.md" ]; then
+      ln -s "$SDLC_DIR/AGENTS.md" "$project_dir/AGENTS.md"
+      created+=("AGENTS.md -> ~/.sdlc/AGENTS.md")
+    else
+      warn "AGENTS.md not found at $SDLC_DIR/AGENTS.md"
+    fi
+  fi
+
+  # .claude/skills/ → ~/.sdlc/skills/
+  mkdir -p "$project_dir/.claude"
+  if [ -L "$project_dir/.claude/skills" ]; then
+    existed+=(".claude/skills (symlink)")
+  else
+    if [ -d "$SDLC_DIR/skills" ]; then
+      ln -s "$SDLC_DIR/skills" "$project_dir/.claude/skills"
+      created+=(".claude/skills -> ~/.sdlc/skills")
+    else
+      warn "skills/ not found at $SDLC_DIR/skills"
+    fi
+  fi
+
+  # .gemini/skills/ → ~/.sdlc/skills/
+  mkdir -p "$project_dir/.gemini"
+  if [ -L "$project_dir/.gemini/skills" ]; then
+    existed+=(".gemini/skills (symlink)")
+  else
+    if [ -d "$SDLC_DIR/skills" ]; then
+      ln -s "$SDLC_DIR/skills" "$project_dir/.gemini/skills"
+      created+=(".gemini/skills -> ~/.sdlc/skills")
+    else
+      warn "skills/ not found at $SDLC_DIR/skills"
+    fi
+  fi
+
+  # .codex/skills/ → ~/.sdlc/skills/
+  mkdir -p "$project_dir/.codex"
+  if [ -L "$project_dir/.codex/skills" ]; then
+    existed+=(".codex/skills (symlink)")
+  else
+    if [ -d "$SDLC_DIR/skills" ]; then
+      ln -s "$SDLC_DIR/skills" "$project_dir/.codex/skills"
+      created+=(".codex/skills -> ~/.sdlc/skills")
+    else
+      warn "skills/ not found at $SDLC_DIR/skills"
+    fi
+  fi
+
+  # .kiro/skills/ → ~/.sdlc/skills/
+  mkdir -p "$project_dir/.kiro"
+  if [ -L "$project_dir/.kiro/skills" ]; then
+    existed+=(".kiro/skills (symlink)")
+  else
+    if [ -d "$SDLC_DIR/skills" ]; then
+      ln -s "$SDLC_DIR/skills" "$project_dir/.kiro/skills"
+      created+=(".kiro/skills -> ~/.sdlc/skills")
+    else
+      warn "skills/ not found at $SDLC_DIR/skills"
+    fi
+  fi
+
+  # .kiro/steering/sdlc-policy.md — from template
+  mkdir -p "$project_dir/.kiro/steering"
+  if [ -f "$project_dir/.kiro/steering/sdlc-policy.md" ]; then
+    existed+=(".kiro/steering/sdlc-policy.md")
+  else
+    if [ -f "$SDLC_DIR/templates/kiro-steering/sdlc-policy.md" ]; then
+      cp "$SDLC_DIR/templates/kiro-steering/sdlc-policy.md" "$project_dir/.kiro/steering/sdlc-policy.md"
+      created+=(".kiro/steering/sdlc-policy.md")
+    else
+      warn "kiro-steering/sdlc-policy.md template not found"
+    fi
+  fi
+
+  # --- Update .gitignore ---
+  local gitignore="$project_dir/.gitignore"
+  local gitignore_entries=("AGENTS.md" ".claude/skills" ".gemini/skills" ".codex/skills" ".kiro/skills")
+  local gitignore_added=()
+
+  if [ ! -f "$gitignore" ]; then
+    touch "$gitignore"
+  fi
+
+  for entry in "${gitignore_entries[@]}"; do
+    if ! grep -qF "$entry" "$gitignore" 2>/dev/null; then
+      echo "$entry" >> "$gitignore"
+      gitignore_added+=("$entry")
+    fi
+  done
+
+  if [ ${#gitignore_added[@]} -gt 0 ]; then
+    created+=(".gitignore (added: ${gitignore_added[*]})")
+  fi
+
+  # --- Summary ---
+  echo ""
+  if [ ${#created[@]} -gt 0 ]; then
+    header "Created:"
+    for item in "${created[@]}"; do
+      pass "$item"
+    done
+  fi
+
+  if [ ${#existed[@]} -gt 0 ]; then
+    echo ""
+    header "Already existed (skipped):"
+    for item in "${existed[@]}"; do
+      warn "$item"
+    done
+  fi
+
+  echo ""
+  info "Run ${BOLD}sdlc doctor${RESET} to verify setup"
+}
+
+cmd_update() {
+  local regenerate=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --regenerate) regenerate=true; shift ;;
+      *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+  done
+
+  header "Updating SDLC Framework"
+  echo ""
+
+  if [ ! -d "$SDLC_DIR/.git" ]; then
+    fail "~/.sdlc/ is not a git repository"
+    exit 1
+  fi
+
+  # Capture current commit for comparison
+  local before_commit
+  before_commit=$(git -C "$SDLC_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+  git -C "$SDLC_DIR" pull --ff-only
+  pass "Pulled latest changes"
+
+  local after_commit
+  after_commit=$(git -C "$SDLC_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+  if [ "$before_commit" = "$after_commit" ]; then
+    info "Already up to date ($after_commit)"
+  else
+    info "Updated: $before_commit -> $after_commit"
+
+    # Show what changed
+    echo ""
+    header "Changes:"
+    git -C "$SDLC_DIR" log --oneline "${before_commit}..${after_commit}" 2>/dev/null | while read -r line; do
+      echo "  $line"
+    done
+  fi
+
+  if [ "$regenerate" = true ]; then
+    echo ""
+    cmd_regenerate
+  else
+    echo ""
+    info "Run ${BOLD}sdlc regenerate${RESET} to update CLAUDE.md/GEMINI.md/CODEX.md in your projects"
+  fi
+}
+
+cmd_doctor() {
+  header "SDLC Doctor"
+  echo ""
+
+  local issues=0
+
+  # --- Global checks ---
+  header "Global:"
+
+  # Check ~/.sdlc/ exists
+  if [ -d "$SDLC_DIR" ]; then
+    pass "~/.sdlc/ exists"
+  else
+    fail "~/.sdlc/ not found — run the installer"
+    ((issues++))
+  fi
+
+  # Check sdlc is in PATH
+  if command -v sdlc >/dev/null 2>&1; then
+    pass "sdlc is in PATH"
+  else
+    fail "sdlc not in PATH — restart your shell or add ~/.sdlc/bin to PATH"
+    ((issues++))
+  fi
+
+  # --- Project checks (only if config.yaml exists) ---
+  if [ -f "config.yaml" ]; then
+    echo ""
+    header "Project: $(pwd)"
+
+    local project_files=("CLAUDE.md" "GEMINI.md" "CODEX.md" "config.yaml" ".project")
+    for f in "${project_files[@]}"; do
+      if [ -f "$f" ]; then
+        pass "$f exists"
+      else
+        fail "$f missing — run: sdlc init"
+        ((issues++))
+      fi
+    done
+
+    # Check symlinks
+    local symlinks=("AGENTS.md" ".claude/skills" ".gemini/skills" ".codex/skills" ".kiro/skills")
+    for s in "${symlinks[@]}"; do
+      if [ -L "$s" ]; then
+        # Check if symlink target exists
+        if [ -e "$s" ]; then
+          pass "$s symlink valid"
+        else
+          fail "$s symlink broken (target missing) — run: sdlc init"
+          ((issues++))
+        fi
+      elif [ -f "$s" ] || [ -d "$s" ]; then
+        warn "$s exists but is not a symlink"
+      else
+        fail "$s missing — run: sdlc init"
+        ((issues++))
+      fi
+    done
+
+    # Check Kiro steering file (real file, not a symlink)
+    if [ -f ".kiro/steering/sdlc-policy.md" ]; then
+      pass ".kiro/steering/sdlc-policy.md exists"
+    else
+      warn ".kiro/steering/sdlc-policy.md missing (optional — run: sdlc init to create)"
+    fi
+  else
+    echo ""
+    info "Not inside an SDLC project (no config.yaml found)"
+    info "Run ${BOLD}sdlc init${RESET} to set up this directory"
+  fi
+
+  # --- Summary ---
+  echo ""
+  if [ "$issues" -eq 0 ]; then
+    pass "All checks passed"
+  else
+    fail "$issues issue(s) found"
+    exit 1
+  fi
+}
+
+cmd_distribute() {
+  local distribute_script="$SDLC_DIR/scripts/distribute.sh"
+
+  if [ ! -f "$distribute_script" ]; then
+    fail "distribute.sh not found at $distribute_script"
+    exit 1
+  fi
+
+  # Pass all args through to distribute.sh
+  if [ $# -gt 0 ]; then
+    bash "$distribute_script" --publish "$@"
+  else
+    bash "$distribute_script"
+  fi
+}
+
+cmd_regenerate() {
+  local project_dir="."
+
+  # Resolve to absolute path
+  project_dir="$(pwd)"
+
+  if [ ! -f "$project_dir/config.yaml" ]; then
+    fail "Not inside an SDLC project (no config.yaml found)"
+    exit 1
+  fi
+
+  header "Regenerating AI configuration files"
+  echo ""
+
+  # Backup and regenerate CLAUDE.md
+  if [ -f "$project_dir/CLAUDE.md" ]; then
+    cp "$project_dir/CLAUDE.md" "$project_dir/CLAUDE.md.bak"
+    pass "Backed up CLAUDE.md -> CLAUDE.md.bak"
+  fi
+  generate_claude_md "$project_dir"
+  pass "CLAUDE.md regenerated"
+
+  # Backup and regenerate GEMINI.md
+  if [ -f "$project_dir/GEMINI.md" ]; then
+    cp "$project_dir/GEMINI.md" "$project_dir/GEMINI.md.bak"
+    pass "Backed up GEMINI.md -> GEMINI.md.bak"
+  fi
+  generate_gemini_md "$project_dir"
+  pass "GEMINI.md regenerated"
+
+  # Backup and regenerate CODEX.md
+  if [ -f "$project_dir/CODEX.md" ]; then
+    cp "$project_dir/CODEX.md" "$project_dir/CODEX.md.bak"
+    pass "Backed up CODEX.md -> CODEX.md.bak"
+  fi
+  generate_codex_md "$project_dir"
+  pass "CODEX.md regenerated"
+
+  echo ""
+  info "Previous versions saved as .bak files"
+}
+
+cmd_setup_token() {
+  header "SDLC Token Setup"
+  echo ""
+  echo "This configures your personal API tokens for task trackers and AI tools."
+  echo "Each team member runs this once with their own credentials."
+  echo ""
+
+  local current_shell
+  current_shell="$(basename "${SHELL:-/bin/bash}")"
+  local rc_file="$HOME/.${current_shell}rc"
+  if [ ! -f "$rc_file" ]; then
+    rc_file="$HOME/.bashrc"
+  fi
+
+  # --- Task Tracker Selection ---
+  echo "${CYAN}[?]${RESET} Which task tracker does your team use?"
+  echo "  1) Asana"
+  echo "  2) Monday.com"
+  echo "  3) Skip tracker setup"
+  echo ""
+  read -rp "  Choice [1-3]: " tracker_choice
+  echo ""
+
+  local tracker_platform="" tracker_token_var="" tracker_token_url="" tracker_token=""
+
+  case "${tracker_choice:-3}" in
+    1)
+      tracker_platform="asana"
+      tracker_token_var="ASANA_TOKEN"
+      tracker_token_url="https://app.asana.com/0/developer-console"
+      ;;
+    2)
+      tracker_platform="monday"
+      tracker_token_var="MONDAY_TOKEN"
+      tracker_token_url="https://monday.com > Admin > Connections > API > Personal API Token"
+      ;;
+    3)
+      info "Skipping tracker setup"
+      ;;
+  esac
+
+  if [ -n "$tracker_platform" ]; then
+    echo "  Get your personal token from:"
+    echo "  ${BOLD}${tracker_token_url}${RESET}"
+    echo ""
+    read -rsp "  Paste your ${tracker_platform} token (hidden): " tracker_token
+    echo ""
+
+    if [ -n "$tracker_token" ]; then
+      # Remove existing token line, then append
+      if grep -qF "export ${tracker_token_var}=" "$rc_file" 2>/dev/null; then
+        grep -vF "export ${tracker_token_var}=" "$rc_file" > "${rc_file}.sdlc-tmp"
+        mv "${rc_file}.sdlc-tmp" "$rc_file"
+      fi
+      echo "export ${tracker_token_var}=\"${tracker_token}\"" >> "$rc_file"
+      pass "Saved ${tracker_token_var} to $(basename "$rc_file")"
+      export "${tracker_token_var}=${tracker_token}"
+    else
+      warn "No token entered — skipping"
+      tracker_platform=""
+    fi
+  fi
+
+  # --- AI Tool Selection ---
+  echo ""
+  echo "${CYAN}[?]${RESET} Which AI coding tools do you use? (comma-separated, e.g. 1,2)"
+  echo "  1) Claude Code"
+  echo "  2) Gemini CLI"
+  echo "  3) Codex CLI"
+  echo "  4) Kiro"
+  echo "  5) Skip tool setup"
+  echo ""
+  read -rp "  Choice: " tool_choices
+  echo ""
+
+  local setup_claude=false setup_gemini=false setup_codex=false setup_kiro=false
+
+  IFS=',' read -ra choices <<< "${tool_choices:-5}"
+  for choice in "${choices[@]}"; do
+    choice="$(echo "$choice" | tr -d ' ')"
+    case "$choice" in
+      1) setup_claude=true ;;
+      2) setup_gemini=true ;;
+      3) setup_codex=true ;;
+      4) setup_kiro=true ;;
+    esac
+  done
+
+  local has_jq=false
+  if command -v jq >/dev/null 2>&1; then
+    has_jq=true
+  fi
+
+  # --- Configure each selected tool ---
+  _configure_tool_mcp() {
+    local tool_name="$1"
+    local settings_dir="$2"
+    local settings_file="$settings_dir/settings.json"
+    local is_claude="$3"
+
+    mkdir -p "$settings_dir"
+
+    if [ -z "$tracker_platform" ] || [ -z "${tracker_token:-}" ]; then
+      info "No tracker token — skipping ${tool_name} MCP config"
+      return
+    fi
+
+    header "--- ${tool_name} ---"
+
+    if [ "$has_jq" = true ]; then
+      local existing="{}"
+      if [ -f "$settings_file" ]; then
+        existing=$(cat "$settings_file")
+      fi
+
+      local updated=""
+      if [ "$tracker_platform" = "asana" ]; then
+        if [ "$is_claude" = true ]; then
+          updated=$(printf '%s' "$existing" | jq --arg token "$tracker_token" '
+            .mcpServers.asana = {
+              "command": "npx",
+              "args": ["-y", "@anthropic-ai/mcp-server-asana"],
+              "env": { "ASANA_ACCESS_TOKEN": $token }
+            }
+            | .permissions.allow = ((.permissions.allow // []) + [
+              "Bash(cai asana-api.sh *)",
+              "mcp__asana__*"
+            ] | unique)
+          ')
+        else
+          updated=$(printf '%s' "$existing" | jq --arg token "$tracker_token" '
+            .mcpServers.asana = {
+              "command": "npx",
+              "args": ["-y", "@anthropic-ai/mcp-server-asana"],
+              "env": { "ASANA_ACCESS_TOKEN": $token }
+            }
+          ')
+        fi
+      elif [ "$tracker_platform" = "monday" ]; then
+        if [ "$is_claude" = true ]; then
+          updated=$(printf '%s' "$existing" | jq --arg token "$tracker_token" '
+            .mcpServers.monday = {
+              "command": "npx",
+              "args": ["-y", "@mondaydotcomorg/monday-api-mcp"],
+              "env": { "MONDAY_API_TOKEN": $token }
+            }
+            | .permissions.allow = ((.permissions.allow // []) + [
+              "mcp__monday__*"
+            ] | unique)
+          ')
+        else
+          updated=$(printf '%s' "$existing" | jq --arg token "$tracker_token" '
+            .mcpServers.monday = {
+              "command": "npx",
+              "args": ["-y", "@mondaydotcomorg/monday-api-mcp"],
+              "env": { "MONDAY_API_TOKEN": $token }
+            }
+          ')
+        fi
+      fi
+
+      printf '%s' "$updated" | jq '.' > "$settings_file"
+      pass "Configured ${tool_name} MCP server for ${tracker_platform}"
+      if [ "$is_claude" = true ]; then
+        pass "Updated permissions in ${settings_file}"
+      fi
+    else
+      if [ -f "$settings_file" ]; then
+        warn "${settings_file} exists and jq not available — manual merge needed"
+        warn "See: ~/.sdlc/trackers/${tracker_platform}.md for config to add"
+      else
+        # Write minimal config without jq
+        local mcp_pkg="" mcp_env_key="" mcp_env_val="" mcp_name=""
+        if [ "$tracker_platform" = "asana" ]; then
+          mcp_name="asana"
+          mcp_pkg="@anthropic-ai/mcp-server-asana"
+          mcp_env_key="ASANA_ACCESS_TOKEN"
+          mcp_env_val="$tracker_token"
+        elif [ "$tracker_platform" = "monday" ]; then
+          mcp_name="monday"
+          mcp_pkg="@mondaydotcomorg/monday-api-mcp"
+          mcp_env_key="MONDAY_API_TOKEN"
+          mcp_env_val="$tracker_token"
+        fi
+
+        if [ "$is_claude" = true ]; then
+          local perms=""
+          if [ "$tracker_platform" = "asana" ]; then
+            perms="\"Bash(cai asana-api.sh *)\", \"mcp__asana__*\""
+          elif [ "$tracker_platform" = "monday" ]; then
+            perms="\"mcp__monday__*\""
+          fi
+          cat > "$settings_file" << TOOL_EOF
+{
+  "mcpServers": {
+    "${mcp_name}": {
+      "command": "npx",
+      "args": ["-y", "${mcp_pkg}"],
+      "env": {
+        "${mcp_env_key}": "${mcp_env_val}"
+      }
+    }
+  },
+  "permissions": {
+    "allow": [${perms}]
+  }
+}
+TOOL_EOF
+        else
+          cat > "$settings_file" << TOOL_EOF
+{
+  "mcpServers": {
+    "${mcp_name}": {
+      "command": "npx",
+      "args": ["-y", "${mcp_pkg}"],
+      "env": {
+        "${mcp_env_key}": "${mcp_env_val}"
+      }
+    }
+  }
+}
+TOOL_EOF
+        fi
+        pass "Created ${settings_file} for ${tracker_platform}"
+      fi
+    fi
+  }
+
+  _configure_codex_mcp() {
+    header "--- Codex CLI ---"
+    mkdir -p "$HOME/.codex"
+
+    if [ -z "$tracker_platform" ] || [ -z "${tracker_token:-}" ]; then
+      info "No tracker token — skipping Codex CLI MCP config"
+      return
+    fi
+
+    if ! command -v codex >/dev/null 2>&1; then
+      warn "codex command not found — skipping Codex MCP auto-configuration"
+      if [ "$tracker_platform" = "asana" ]; then
+        echo "  Run later: codex mcp add asana --env ASANA_ACCESS_TOKEN=<token> -- npx -y @anthropic-ai/mcp-server-asana"
+      elif [ "$tracker_platform" = "monday" ]; then
+        echo "  Run later: codex mcp add monday --env MONDAY_API_TOKEN=<token> -- npx -y @mondaydotcomorg/monday-api-mcp"
+      fi
+      return
+    fi
+
+    if [ "$tracker_platform" = "asana" ]; then
+      codex mcp remove asana >/dev/null 2>&1 || true
+      codex mcp add asana --env "ASANA_ACCESS_TOKEN=${tracker_token}" -- npx -y @anthropic-ai/mcp-server-asana
+    elif [ "$tracker_platform" = "monday" ]; then
+      codex mcp remove monday >/dev/null 2>&1 || true
+      codex mcp add monday --env "MONDAY_API_TOKEN=${tracker_token}" -- npx -y @mondaydotcomorg/monday-api-mcp
+    fi
+
+    pass "Configured Codex CLI MCP server for ${tracker_platform} (stored in ~/.codex/config.toml)"
+  }
+
+  _configure_kiro_mcp() {
+    header "--- Kiro ---"
+    local settings_dir="$HOME/.kiro/settings"
+    local settings_file="$settings_dir/mcp.json"
+
+    mkdir -p "$settings_dir"
+
+    if [ -z "$tracker_platform" ] || [ -z "${tracker_token:-}" ]; then
+      info "No tracker token — skipping Kiro MCP config"
+      return
+    fi
+
+    if [ "$has_jq" = true ]; then
+      local existing='{"mcpServers":{}}'
+      if [ -f "$settings_file" ]; then
+        existing=$(cat "$settings_file")
+      fi
+
+      local updated=""
+      if [ "$tracker_platform" = "asana" ]; then
+        updated=$(printf '%s' "$existing" | jq --arg token "$tracker_token" '
+          .mcpServers.asana = {
+            "command": "npx",
+            "args": ["-y", "@anthropic-ai/mcp-server-asana"],
+            "env": { "ASANA_ACCESS_TOKEN": $token },
+            "disabled": false,
+            "autoApprove": []
+          }
+        ')
+      elif [ "$tracker_platform" = "monday" ]; then
+        updated=$(printf '%s' "$existing" | jq --arg token "$tracker_token" '
+          .mcpServers.monday = {
+            "command": "npx",
+            "args": ["-y", "@mondaydotcomorg/monday-api-mcp"],
+            "env": { "MONDAY_API_TOKEN": $token },
+            "disabled": false,
+            "autoApprove": []
+          }
+        ')
+      fi
+
+      printf '%s' "$updated" | jq '.' > "$settings_file"
+      pass "Configured Kiro MCP server for ${tracker_platform} (${settings_file})"
+    else
+      if [ -f "$settings_file" ]; then
+        warn "${settings_file} exists and jq not available — manual merge needed"
+        warn "See: ~/.sdlc/trackers/${tracker_platform}.md for config to add"
+      else
+        local mcp_name="" mcp_pkg="" mcp_env_key=""
+        if [ "$tracker_platform" = "asana" ]; then
+          mcp_name="asana"
+          mcp_pkg="@anthropic-ai/mcp-server-asana"
+          mcp_env_key="ASANA_ACCESS_TOKEN"
+        elif [ "$tracker_platform" = "monday" ]; then
+          mcp_name="monday"
+          mcp_pkg="@mondaydotcomorg/monday-api-mcp"
+          mcp_env_key="MONDAY_API_TOKEN"
+        fi
+
+        cat > "$settings_file" << KIRO_EOF
+{
+  "mcpServers": {
+    "${mcp_name}": {
+      "command": "npx",
+      "args": ["-y", "${mcp_pkg}"],
+      "env": {
+        "${mcp_env_key}": "${tracker_token}"
+      },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+KIRO_EOF
+        pass "Created ${settings_file} for ${tracker_platform}"
+      fi
+    fi
+  }
+
+  if [ "$setup_claude" = true ]; then
+    _configure_tool_mcp "Claude Code" "$HOME/.claude" true
+  fi
+
+  if [ "$setup_gemini" = true ]; then
+    _configure_tool_mcp "Gemini CLI" "$HOME/.gemini" false
+  fi
+
+  if [ "$setup_codex" = true ]; then
+    _configure_codex_mcp
+  fi
+
+  if [ "$setup_kiro" = true ]; then
+    _configure_kiro_mcp
+  fi
+
+  # --- Summary ---
+  echo ""
+  header "Setup complete!"
+  echo ""
+  echo "  Restart your shell or run: ${BOLD}source ${rc_file}${RESET}"
+  echo ""
+  if [ -n "$tracker_platform" ]; then
+    echo "  Tracker:  ${BOLD}${tracker_platform}${RESET} (token in $(basename "$rc_file"))"
+  fi
+  [ "$setup_claude" = true ] && echo "  Claude:   ${BOLD}~/.claude/settings.json${RESET}"
+  [ "$setup_gemini" = true ] && echo "  Gemini:   ${BOLD}~/.gemini/settings.json${RESET}"
+  [ "$setup_codex" = true ]  && echo "  Codex:    ${BOLD}~/.codex/config.toml${RESET}"
+  [ "$setup_kiro" = true ]   && echo "  Kiro:     ${BOLD}~/.kiro/settings/mcp.json${RESET}"
+  echo ""
+  echo "  Run ${BOLD}sdlc doctor${RESET} to verify everything is working."
+}
+
+cmd_help() {
+  local version
+  version=$(get_version)
+
+  cat << HELP
+${BOLD}sdlc${RESET} v${version} — SDLC Framework CLI
+
+${BOLD}Usage:${RESET}
+  sdlc <command> [options]
+
+${BOLD}Commands:${RESET}
+  ${BOLD}init${RESET} [path]          Initialize SDLC in a project directory (default: current dir)
+                        Creates CLAUDE.md, GEMINI.md, CODEX.md, config.yaml, .project
+                        Sets up symlinks for AGENTS.md and skills/ (Claude, Gemini, Codex, Kiro)
+                        Creates .kiro/steering/sdlc-policy.md for Kiro steering
+                        Skips files that already exist
+
+  ${BOLD}setup-token${RESET}          Configure personal API tokens for trackers and AI tools
+                        Each team member runs this once with their own credentials
+                        Configures shell env var + MCP servers for Claude/Gemini/Codex
+
+  ${BOLD}update${RESET}               Pull latest SDLC framework from git
+    --regenerate         Also regenerate CLAUDE.md/GEMINI.md/CODEX.md
+
+  ${BOLD}doctor${RESET}               Check installation health and project setup
+
+  ${BOLD}distribute${RESET} [org]     Create a clean distribution copy
+                        With org: publish mode (replace placeholders + push)
+                        Without: local copy only
+
+  ${BOLD}regenerate${RESET}           Regenerate CLAUDE.md, GEMINI.md, CODEX.md from latest templates
+                        Backs up existing files as .bak before overwriting
+
+  ${BOLD}version${RESET}              Print version
+
+  ${BOLD}help${RESET}                 Show this help message
+
+${BOLD}Examples:${RESET}
+  sdlc init                     # Initialize current directory
+  sdlc init ~/projects/myapp    # Initialize a specific project
+  sdlc setup-token              # Configure your personal tokens
+  sdlc update --regenerate      # Pull latest + regenerate config files
+  sdlc doctor                   # Check everything is set up correctly
+  sdlc distribute acme-corp     # Publish to a GitHub org
+HELP
+}
+
+cmd_version() {
+  echo "sdlc v$(get_version)"
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+if [ $# -eq 0 ]; then
+  cmd_help
+  exit 0
+fi
+
+command="$1"
+shift
+
+case "$command" in
+  init)        cmd_init "$@" ;;
+  setup-token) cmd_setup_token ;;
+  update)      cmd_update "$@" ;;
+  doctor)      cmd_doctor ;;
+  distribute)  cmd_distribute "$@" ;;
+  regenerate)  cmd_regenerate ;;
+  version)     cmd_version ;;
+  help|--help|-h) cmd_help ;;
+  *)
+    fail "Unknown command: $command"
+    echo ""
+    cmd_help
+    exit 1
+    ;;
+esac
