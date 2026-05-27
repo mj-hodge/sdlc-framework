@@ -1,0 +1,104 @@
+# Project Configuration
+
+project:
+  name: <project-name>
+  mode: new_project  # or feature_update
+  scope: medium      # trivial, small, medium, large
+
+# Model settings
+models:
+  default: sonnet           # Default for implementation
+  opus_allowed: false       # Requires human override to enable
+
+# Abstract model tiers (cross-CLI mapping)
+model_tiers:
+  tier_1:                   # reasoning — Phase 1, 6, 9, 10
+    claude: opus
+    gemini: pro
+    codex: gpt-5
+  tier_2:                   # execution — Phase 2-5, 7, 8, 8b
+    claude: sonnet
+    gemini: flash
+    codex: gpt-5-mini
+
+council:
+  enabled: true
+  tier: free         # premium, economical, free
+  phases:
+    - "4→5"
+    - "6→7"
+
+phases:
+  skip: []           # e.g., [2, 3] to skip Research and Expansion
+  require_approval:
+    - 5
+    - 6
+
+tech_stack:
+  backend: python/fastapi
+  frontend: react/vite
+  database: postgresql
+
+domain:
+  base: gorillacommerce.ai           # Base domain for all apps
+  dns_resource_group: rg-dns-gorillacommerce  # Azure RG containing DNS zone
+  pattern:
+    prod: "{app}.gorillacommerce.ai"          # Production URL
+    dev: "{app}.dev.gorillacommerce.ai"       # Development URL
+  auto_register: true                  # Auto-create DNS records during deploy
+
+naming:
+  convention: "{department}-{product}"     # Repo and base resource name
+  github_org: hpi-gorillacommerce
+  subdomain_patterns:
+    mcp: "mcp-{department}-{product}"      # MCP server: mcp-advertising-amazon.gorillacommerce.ai
+    dashboard: "{department}-{product}"    # Dashboard/app: advertising-amazon.gorillacommerce.ai
+    api: "api-{department}-{product}"      # Standalone API: api-advertising-amazon.gorillacommerce.ai
+    worker: "worker-{department}-{product}" # Background worker (if exposed)
+  azure_resources:
+    managed_identity: "id-{department}-{product}"
+    log_analytics: "log-{department}-{product}"
+    container_registry: "acr{department}{product}"  # alphanumeric only
+    key_vault: "kv-{department}-{product}"
+    aca_environment: "cae-{department}-{product}"
+    container_app: "ca-{department}-{product}"      # suffix with service type if multiple: ca-mcp-..., ca-dash-...
+    resource_group: "rg-{department}-{product}-{env}"
+
+task_tracker:
+  platform: monday      # asana, monday, linear, jira, custom
+  project_prefix: ""    # board name matches repo name (e.g., advertising-amazon)
+
+# Source sync (Claude desktop app project sync) — see /sync-source skill
+source_sync:
+  enabled: false                                                 # set true to enable /sync-source
+  source_path: ""                                                # absolute path to Claude desktop app sync folder (e.g. "C:/Users/<you>/Desktop/<project-uuid>")
+  reference_path: "reference"                                    # where to copy synced files in the project
+  baseline_file: ".claude/sync/source-baseline.json"             # tracked diff baseline (commit this)
+
+testing:
+  framework: playwright
+  coverage_target: 70
+  smoke_only: false
+  browser_testing: true    # Enable Playwright e2e in Phase 8b (frontend projects)
+
+logging:
+  format: json              # json (production) or console (development)
+  level: INFO               # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  correlation_ids: true     # Enable trace_id propagation
+  scrub_secrets: true       # Enable ScrubProcessor for secret redaction
+
+orchestration:
+  context_strategy: grouped  # strict (every phase), grouped (between groups), minimal (before/after Phase 8)
+  auto_advance: true         # Enable auto/confirm/gate advance categories
+  parallel_execution: true   # Enable [6b, 6c, 6d] and [9, 10] parallel groups
+  parallel_stories: false    # Enable parallel story execution in Phase 8 (worktree isolation)
+  parallel_stories_min: 3    # Minimum story count to trigger parallel execution
+  advance_overrides: {}      # Per-phase overrides, e.g., { "6b": "confirm", "8b": "confirm" }
+  multi_worker: true           # Enable multi-worker story processing (multiple humans/agents advancing different stories)
+  max_workers: 5               # Maximum concurrent workers per project
+  claiming: assignee           # How stories are claimed: "assignee" (Asana field) or "branch" (git branch exists)
+  worker_id: ""                # Override auto-detected worker identity (default: git config user.name)
+
+skills:
+  auto_sync_backlog: true
+  council_phases: ["4→5", "6→7"]

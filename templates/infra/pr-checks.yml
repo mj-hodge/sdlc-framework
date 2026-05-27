@@ -1,0 +1,133 @@
+# PR Checks -- lightweight checks for every pull request.
+#
+# Based on battle-tested pipeline from advertising-amazon.
+# Copy to .github/workflows/pr-checks.yml
+#
+# Runs unit tests, secret scan, and dependency audit in parallel.
+# Fast feedback loop -- keeps PRs honest without blocking on full deploy gate.
+
+name: PR Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Unit tests (subset -- fast feedback on PRs)
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # <!-- CUSTOMIZE: Set up your language runtime -->
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # <!-- CUSTOMIZE: Install command for your project -->
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      # <!-- CUSTOMIZE: Test command and paths for fast PR feedback -->
+      - name: Run unit tests
+        run: |
+          pytest tests/ \
+            --timeout=15 -q
+
+      - name: Write test summary
+        if: always()
+        run: |
+          echo "## PR Unit Tests" >> $GITHUB_STEP_SUMMARY
+          echo "Test run complete. See job logs for details." >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Secret scan (gitleaks)
+  # ---------------------------------------------------------------------------
+  secret-scan:
+    name: Secret Scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # <!-- CUSTOMIZE: Add GITLEAKS_LICENSE secret if using gitleaks enterprise -->
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      - name: Write secret scan summary
+        if: always()
+        run: |
+          echo "## Secret Scan" >> $GITHUB_STEP_SUMMARY
+          echo "gitleaks scan complete. See job logs for details." >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Dependency CVE audit
+  # ---------------------------------------------------------------------------
+  dep-audit:
+    name: CVE Audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # <!-- CUSTOMIZE: Set up your language runtime -->
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # <!-- CUSTOMIZE: For Node.js projects, replace with `npm audit --audit-level=high` -->
+      - name: Install pip-audit and project
+        run: |
+          pip install pip-audit
+          pip install -e "."
+
+      - name: Run pip-audit
+        run: pip-audit --format json --output pip-audit-pr.json || true
+
+      - name: Upload CVE report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-pr-report
+          path: pip-audit-pr.json
+          if-no-files-found: ignore
+
+      - name: Write dep-audit summary
+        if: always()
+        run: |
+          echo "## Dependency CVE Audit" >> $GITHUB_STEP_SUMMARY
+          echo "pip-audit complete. See artifact for details." >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # PR Gate Summary
+  # ---------------------------------------------------------------------------
+  pr-summary:
+    name: PR Check Summary
+    needs: [unit-tests, secret-scan, dep-audit]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write gate summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'SUMMARY'
+          ## PR Checks Summary
+          | Check | Status |
+          |-------|--------|
+          SUMMARY
+          echo "| Unit Tests | ${{ needs.unit-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Secret Scan | ${{ needs.secret-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| CVE Audit | ${{ needs.dep-audit.result }} |" >> $GITHUB_STEP_SUMMARY

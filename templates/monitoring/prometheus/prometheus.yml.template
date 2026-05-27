@@ -1,0 +1,114 @@
+# prometheus.yml.template — Prometheus configuration for MCP server monitoring
+#
+# Usage:
+#   1. Copy to monitoring/prometheus.yml in your project
+#   2. Replace <SERVER_NAME> with your MCP server name (e.g. datalake-mcp)
+#   3. Replace <HOST>:<PORT> with your server's metrics endpoint
+#   4. Uncomment and configure additional scrape jobs as needed
+#
+# Start Prometheus:
+#   docker run -v $(pwd)/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml \
+#     -p 9090:9090 prom/prometheus:latest
+
+global:
+  scrape_interval: 15s        # How often to scrape targets
+  evaluation_interval: 1m     # How often to evaluate alert rules
+  scrape_timeout: 10s         # Timeout for each scrape
+
+  # External labels added to all metrics (useful when federating to Thanos/Cortex)
+  external_labels:
+    environment: production   # TODO: change to staging/dev as appropriate
+    # TODO: set cluster or region label if using multi-region setup
+
+# ---------------------------------------------------------------------------
+# Alert rules
+# ---------------------------------------------------------------------------
+rule_files:
+  # TODO: Update path to match where you put mcp-base-rules.yml
+  - "alerts/mcp-base-rules.yml"
+  # Add project-specific rule files here:
+  # - "alerts/mcp-<server-name>-custom-rules.yml"
+
+# ---------------------------------------------------------------------------
+# Alertmanager integration
+# ---------------------------------------------------------------------------
+alerting:
+  alertmanagers:
+    - static_configs:
+        # TODO: Update host:port to your Alertmanager instance
+        - targets: ["alertmanager:9093"]
+      # Timeout for sending alerts to Alertmanager
+      timeout: 10s
+
+# ---------------------------------------------------------------------------
+# Scrape configurations
+# ---------------------------------------------------------------------------
+scrape_configs:
+
+  # MCP Server — primary metrics endpoint
+  - job_name: "<SERVER_NAME>"   # TODO: Replace with your server name (matches $job in alerts/dashboards)
+    metrics_path: /metrics
+    scheme: http                # TODO: Change to https if your server uses TLS
+    static_configs:
+      - targets:
+          # TODO: Replace with your actual host:port
+          - "<HOST>:<PORT>"    # e.g. localhost:8000 or mcp-datalake.gorillacommerce.ai:443
+        labels:
+          server: "<SERVER_NAME>"
+          # TODO: Add environment label if not set globally
+          # environment: production
+
+    # Optional: Add basic auth if your /metrics endpoint requires it
+    # basic_auth:
+    #   username: prometheus
+    #   password_file: /etc/prometheus/metrics-password
+
+    # Optional: TLS configuration
+    # tls_config:
+    #   ca_file: /etc/prometheus/ca.crt
+    #   insecure_skip_verify: false
+
+  # Prometheus self-monitoring
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Optional: Node exporter for host metrics (if running on a VM)
+  # - job_name: node-exporter
+  #   static_configs:
+  #     - targets: ["node-exporter:9100"]
+
+  # Optional: Additional MCP servers (e.g. mcp-advertising-amazon alongside datalake-mcp)
+  # - job_name: "mcp-advertising-amazon"
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ["mcp-advertising-amazon.gorillacommerce.ai:443"]
+  #   scheme: https
+
+  # ---------------------------------------------------------------------------
+  # Multi-project monitoring (tech dashboard)
+  # ---------------------------------------------------------------------------
+  # To monitor all projects from a single Prometheus instance, add each
+  # project as a separate job. The multi-project Grafana dashboard
+  # (tech-dashboard-001) uses the $job variable to aggregate across all.
+  #
+  # Option A: Static targets (simple)
+  # - job_name: "datalake-mcp"
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ["mcp-datalake.gorillacommerce.ai:443"]
+  #       labels:
+  #         server: "datalake-mcp"
+  #         team: "platform"
+  #   scheme: https
+  #
+  # Option B: File-based service discovery (scales better)
+  # - job_name: "all-services"
+  #   file_sd_configs:
+  #     - files:
+  #         - "targets/*.yml"
+  #       refresh_interval: 30s
+  #   relabel_configs:
+  #     - source_labels: [__meta_filepath]
+  #       regex: ".*/([^/]+)\\.yml"
+  #       target_label: "server"

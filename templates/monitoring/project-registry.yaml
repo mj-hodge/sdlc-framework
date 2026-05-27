@@ -1,0 +1,35 @@
+# Project Registry — central catalog for the org-wide tech dashboard
+# Updated automatically by `setup-project.sh --init` or manually.
+#
+# Each entry maps a project name to its monitoring metadata.
+# The multi-project Grafana dashboard reads job names from this registry.
+
+projects: []
+  # Example entries (uncomment and adapt):
+  #
+  # Naming conventions:
+  #   repo name:        {department}-{product}          e.g. datalake, advertising-amazon
+  #   MCP server name:  {type}-{dept}-{product}         e.g. mcp-datalake, mcp-advertising-amazon
+  #   dashboard name:   {dept}-{product}-dashboard      e.g. advertising-amazon-dashboard
+  #   service subdomain (MCP):       mcp-{dept}-{product}.gorillacommerce.ai
+  #   service subdomain (dashboard): {dept}-{product}.gorillacommerce.ai
+  #
+  # MCP server for datalake product
+  # - name: datalake-mcp
+  #   job_name: datalake-mcp          # Prometheus job label
+  #   type: mcp-server                # mcp-server | backend-api | frontend | worker
+  #   tier: standard                  # essential | standard | premium | critical
+  #   team: platform                  # owning team (used for alert routing)
+  #   metrics_endpoint: https://mcp-datalake.gorillacommerce.ai/metrics
+  #   health_endpoint: https://mcp-datalake.gorillacommerce.ai/health
+  #   repo: https://github.com/hpi-gorillacommerce/datalake
+  #
+  # Dashboard for advertising-amazon product
+  # - name: advertising-amazon-dashboard
+  #   job_name: advertising-amazon-dashboard
+  #   type: frontend
+  #   tier: standard
+  #   team: advertising
+  #   metrics_endpoint: https://advertising-amazon.gorillacommerce.ai/metrics
+  #   health_endpoint: https://advertising-amazon.gorillacommerce.ai/health
+  #   repo: https://github.com/hpi-gorillacommerce/advertising-amazon

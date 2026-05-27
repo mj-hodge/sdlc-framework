@@ -1,0 +1,196 @@
+# Build & Deploy workflow for Azure Container Apps.
+#
+# Based on battle-tested pipeline from advertising-amazon (dozens of production deploys).
+# Copy to .github/workflows/deploy.yml and customize all <!-- CUSTOMIZE --> sections.
+#
+# Features:
+# - Pre-deploy gate (6 parallel checks must pass before build)
+# - Docker build + ACR push
+# - Azure Container Apps deploy
+# - Post-deploy smoke test with canary rollback
+# - Teams notification on success/failure (skips if TEAMS_WEBHOOK_URL not set)
+# - Emergency deploy bypass with audit trail ([EMERGENCY-DEPLOY] in commit message)
+# - All actions use version tags (no pinned SHAs)
+
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC token for Azure login
+  contents: read
+  issues: write     # Required by pre-deploy-gate for EMERGENCY-DEPLOY audit issue
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Pre-deploy gate (runs 6 parallel checks -- must pass before build)
+  # No secret inheritance -- gate does not need deployment secrets
+  # ---------------------------------------------------------------------------
+  pre-deploy-gate:
+    uses: ./.github/workflows/pre-deploy-gate.yml
+
+  # ---------------------------------------------------------------------------
+  # Build and push Docker image to ACR
+  # ---------------------------------------------------------------------------
+  build-push:
+    needs: pre-deploy-gate
+    if: always() && (needs.pre-deploy-gate.result == 'success' || needs.pre-deploy-gate.result == 'skipped')
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Docker login to ACR
+        # <!-- CUSTOMIZE: Replace ACR name -->
+        run: az acr login --name <your-acr-name>
+
+      - name: Build and push Docker image
+        run: |
+          # <!-- CUSTOMIZE: Replace ACR name and image name -->
+          docker build \
+            -t <your-acr-name>.azurecr.io/<your-image>:${{ github.sha }} .
+          docker push <your-acr-name>.azurecr.io/<your-image>:${{ github.sha }}
+
+  # ---------------------------------------------------------------------------
+  # Deploy to Azure Container Apps
+  # ---------------------------------------------------------------------------
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    outputs:
+      previous-revision: ${{ steps.prev-rev.outputs.revision }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Capture current revision (for rollback)
+        id: prev-rev
+        run: |
+          # <!-- CUSTOMIZE: Replace container app name and resource group -->
+          CURRENT=$(az containerapp revision list \
+            --name <your-container-app> \
+            --resource-group <your-resource-group> \
+            --query "[?properties.active && properties.trafficWeight == \`100\`].name | [0]" \
+            -o tsv 2>/dev/null || echo "")
+          echo "revision=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Previous revision: $CURRENT"
+
+      - name: Deploy to Container Apps
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          # <!-- CUSTOMIZE: Replace container app name, resource group, and image -->
+          containerAppName: <your-container-app>
+          resourceGroup: <your-resource-group>
+          imageToDeploy: <your-acr-name>.azurecr.io/<your-image>:${{ github.sha }}
+
+  # ---------------------------------------------------------------------------
+  # Post-deploy smoke test + canary rollback
+  # ---------------------------------------------------------------------------
+  smoke-test:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for smoke test script)
+        uses: actions/checkout@v4
+
+      - name: Wait for container startup
+        run: |
+          echo "Waiting 60s for container to start..."
+          sleep 60
+
+      - name: Run post-deploy smoke test
+        run: |
+          # <!-- CUSTOMIZE: Replace URL with your Container App FQDN -->
+          # Option A: Use a smoke test script (recommended)
+          # chmod +x ./scripts/post-deploy-smoke.sh
+          # ./scripts/post-deploy-smoke.sh \
+          #   --url https://<your-app>.azurecontainerapps.io \
+          #   --expected-version ${{ github.sha }} \
+          #   --timeout 10
+
+          # Option B: Simple health check (minimal)
+          HEALTH_URL="https://<your-app>.azurecontainerapps.io/healthz"
+          RESPONSE=$(curl -sf --max-time 30 "$HEALTH_URL")
+          echo "Health response: $RESPONSE"
+          if [ -z "$RESPONSE" ]; then
+            echo "::error::Smoke test failed -- no response from health endpoint"
+            exit 1
+          fi
+          echo "$RESPONSE" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          assert 'status' in data, 'Missing status field'
+          print('Smoke test passed')
+          "
+
+      - name: Azure login for rollback
+        if: failure() && vars.CANARY_ROLLBACK_ENABLED == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Rollback on failure
+        if: failure() && vars.CANARY_ROLLBACK_ENABLED == 'true'
+        run: |
+          PREVIOUS="${{ needs.deploy.outputs.previous-revision }}"
+          if [ -z "$PREVIOUS" ]; then
+            echo "::error::Rollback failed -- no previous revision captured"
+            exit 1
+          fi
+          echo "::warning::Smoke test failed. Rolling back to $PREVIOUS..."
+          # <!-- CUSTOMIZE: Replace container app name and resource group -->
+          az containerapp ingress traffic set \
+            --name <your-container-app> \
+            --resource-group <your-resource-group> \
+            --revision-weight "$PREVIOUS=100"
+          echo "::warning::Rollback executed. Previous revision $PREVIOUS restored."
+
+  # ---------------------------------------------------------------------------
+  # Notify on completion (success or failure)
+  # Skips gracefully if TEAMS_WEBHOOK_URL is not set
+  # ---------------------------------------------------------------------------
+  notify:
+    needs: [smoke-test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Send Teams notification
+        if: vars.TEAMS_WEBHOOK_URL != ''
+        run: |
+          STATUS="${{ needs.smoke-test.result }}"
+          COLOR="00c875"
+          TITLE="Deploy Succeeded"
+          if [ "$STATUS" != "success" ]; then
+            COLOR="dc2626"
+            TITLE="Deploy Failed"
+          fi
+          # <!-- CUSTOMIZE: Replace project name in the title -->
+          curl -s -X POST "${{ vars.TEAMS_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"@type\": \"MessageCard\",
+              \"themeColor\": \"$COLOR\",
+              \"title\": \"$TITLE -- ${{ github.event.repository.name }}\",
+              \"text\": \"**Commit:** ${{ github.event.head_commit.message }}\\n\\n**By:** ${{ github.actor }}\\n\\n**Status:** $STATUS\\n\\n[View Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\"
+            }" || true

@@ -1,0 +1,51 @@
+# Project Status
+
+## Current Work
+| Field | Value |
+|-------|-------|
+| Story | STORY-591: Critical-Feature SDLC Pattern |
+| Phase | 10 - Operations |
+| Status | complete |
+| Scope | large |
+| Branch | story-591/story-591 |
+| Story Folder | features/story-591-critical-feature-pattern |
+
+## Phase Routing
+| Phase | Status | Deliverable |
+|-------|--------|-------------|
+| 1 - Seed | complete | features/story-591-critical-feature-pattern/seed.md |
+| 2 - Research | complete | features/story-591-critical-feature-pattern/research.md |
+| 3 - Expansion | complete | features/story-591-critical-feature-pattern/expansion.md |
+| 4 - Analysis | complete | features/story-591-critical-feature-pattern/analysis.md |
+| 5 - Selection | complete | features/story-591-critical-feature-pattern/selection.md |
+| 6 - Design | complete | specification.md, architecture.md, api-design.md, implementation-plan.md |
+| 6b - Security | complete | features/story-591-critical-feature-pattern/security-review.md |
+| 6c - UX Review | complete | features/story-591-critical-feature-pattern/ux-review.md |
+| 6d - Ops Review | complete | features/story-591-critical-feature-pattern/ops-review.md |
+| 7 - Test Design | complete | features/story-591-critical-feature-pattern/test-design.md |
+| 8 - Implementation | complete | templates/seed.md, templates/output-contracts.md, templates/critical-features-index.md, patterns/critical-features.md, agents/phase-1-seed.md, agents/phase-7-test-design.md, agents/phase-10-operations.md, agents/phase-11-predeploy-gate.md, AGENTS.md |
+| 8b - Code Review | pending | features/story-591-critical-feature-pattern/code-review.md |
+| 11 - Pre-Deploy | pending | features/story-591-critical-feature-pattern/predeploy-gate.md |
+| 9 - Refinement | complete | features/story-591-critical-feature-pattern/refinement-report.md |
+| 10 - Operations | complete | features/story-591-critical-feature-pattern/site-reliability.md |
+
+## Decisions
+- 2026-04-25: STORY-591 seeded. Large scope, critical criticality. Generic pattern for all GC projects. Zero changes to advertising-amazon (STORY-592 handles that).
+- 2026-04-25: Phase 4 complete. Approach A (Full Phase 10c) selected. Key mitigations: per-contract `blocking: true` flag, business-level contract template examples, direct violation→health coupling, lint enforcement of criticality field at Phase 11.
+- 2026-04-25: Phase 6 complete. Full design: specification.md (10 sections), architecture.md (component map + data flows), api-design.md (/api/status JSON + /status HTML + violation events + Grafana template), implementation-plan.md (4 groups, 10 tasks).
+- 2026-04-25: Phases 6b/6c/6d complete (parallel). Security: 10 findings (2 High — violation event PII, test fixture credentials). UX: accessibility blockers (color-blind, WCAG contrast, mobile viewport). Ops: 3 High gaps (restart state loss, multi-replica inconsistency, /health vs /api/status separation).
+
+## Version History
+| Version | Date | Change |
+|---------|------|--------|
+| 0.1.0 | 2026-04-25 | STORY-591 Phase 1 complete — seed.md created |
+| 0.2.0 | 2026-04-25 | STORY-591 Phase 4 complete — analysis.md created, Approach A selected |
+| 0.3.0 | 2026-04-25 | STORY-591 Phase 6 complete — specification, architecture, api-design, implementation-plan |
+| 0.4.0 | 2026-04-25 | STORY-591 Phases 6b/6c/6d complete — security, UX, ops reviews |
+| 0.5.0 | 2026-04-25 | STORY-591 Phase 2 complete (retroactive) — research.md confirming no market/library covers feature-level business output contracts |
+| 0.6.0 | 2026-04-25 | STORY-591 Phase 3 complete (retroactive) — expansion.md with 8 approaches; A4+A5+A6 composition validates selected design |
+| 0.7.0 | 2026-04-25 | STORY-591 Phase 5 complete (retroactive) — selection.md formalizing A4+A5+A6, MVP scope, migration strategy, fallback |
+| 0.8.0 | 2026-04-25 | STORY-591 Phase 7 complete — 61 tests in RED state (47 failed, 14 passed); test-design.md; contract tests C1/C2/C3 |
+| 0.9.0 | 2026-04-25 | STORY-591 Phase 8 complete — 61/61 GREEN; 9 framework files created/updated; 6 commits |
+| 0.10.0 | 2026-04-25 | STORY-591 Phase 9 complete — refinement report: 31 review findings mapped, 0 Critical/5 High/7 Medium/7 Low gaps identified |
+| 0.11.0 | 2026-04-25 | STORY-591 Phase 10 complete — site-reliability.md: Essential tier, 6 Phase 9 gaps addressed (H1/H4/H5/OPS-04/OPS-05/OPS-06), 6 design gaps for retro, 4 runbooks, deployment safety for submodule updates |

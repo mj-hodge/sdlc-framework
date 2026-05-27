@@ -1,0 +1,203 @@
+# mcp-base-rules.yml — Generic Prometheus alert rules for any MCP server
+#
+# Usage:
+#   1. Copy to your project: cp mcp-base-rules.yml monitoring/alerts/mcp-rules.yml
+#   2. Replace <JOB_NAME> with your Prometheus job name (e.g. mcp-datalake, mcp-advertising-amazon)
+#   3. Replace <SERVER_NAME> with your human-readable server name for alert labels
+#   4. Load into Prometheus via rules_files or Grafana provisioning
+#
+# Metric conventions assumed (instrument your server to match):
+#   mcp_tool_calls_total{job, tool_name, status}         — counter
+#   mcp_tool_call_duration_seconds{job, tool_name}       — histogram
+#   mcp_auth_failures_total{job, reason}                 — counter
+#   mcp_adapter_errors_total{job, adapter, error_type}   — counter
+#   up{job}                                              — standard Prometheus scrape health
+
+groups:
+  - name: mcp-server-availability
+    # Evaluation interval: inherits from Prometheus global (recommend 1m)
+    rules:
+
+      - alert: MCPServerDown
+        # Fires when Prometheus cannot scrape the MCP server for 2 consecutive minutes.
+        expr: up{job="<JOB_NAME>"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          server: <SERVER_NAME>
+          team: platform
+        annotations:
+          summary: "MCP server {{ $labels.job }} is down"
+          description: >
+            Prometheus cannot reach {{ $labels.job }} at {{ $labels.instance }}.
+            The server has been unreachable for {{ $value | humanizeDuration }}.
+            Check container health, ACA ingress, and network rules.
+          runbook: "https://wiki.internal/runbooks/mcp-server-down"
+
+  - name: mcp-error-rate
+    rules:
+
+      - alert: MCPHighErrorRate
+        # Fires when tool call error rate exceeds 1% over a 5-minute window.
+        expr: >
+          sum(rate(mcp_tool_calls_total{job="<JOB_NAME>", status="error"}[5m]))
+          /
+          sum(rate(mcp_tool_calls_total{job="<JOB_NAME>"}[5m]))
+          > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          server: <SERVER_NAME>
+          team: platform
+        annotations:
+          summary: "MCP server {{ $labels.job }} error rate > 1%"
+          description: >
+            Error rate is {{ $value | humanizePercentage }} over the last 5 minutes.
+            Investigate adapter connectivity and upstream API health.
+          runbook: "https://wiki.internal/runbooks/mcp-high-error-rate"
+
+      - alert: MCPCriticalErrorRate
+        # Fires when error rate exceeds 10% — likely total outage of one or more tools.
+        expr: >
+          sum(rate(mcp_tool_calls_total{job="<JOB_NAME>", status="error"}[5m]))
+          /
+          sum(rate(mcp_tool_calls_total{job="<JOB_NAME>"}[5m]))
+          > 0.10
+        for: 2m
+        labels:
+          severity: critical
+          server: <SERVER_NAME>
+          team: platform
+        annotations:
+          summary: "MCP server {{ $labels.job }} error rate > 10%"
+          description: >
+            Critical error rate: {{ $value | humanizePercentage }} over the last 5 minutes.
+            One or more tools may be completely failing.
+          runbook: "https://wiki.internal/runbooks/mcp-high-error-rate"
+
+  - name: mcp-latency
+    rules:
+
+      - alert: MCPHighLatency
+        # Fires when p99 tool call latency exceeds 10 seconds.
+        expr: >
+          histogram_quantile(0.99,
+            sum(rate(mcp_tool_call_duration_seconds_bucket{job="<JOB_NAME>"}[5m]))
+            by (le)
+          ) > 10
+        for: 5m
+        labels:
+          severity: warning
+          server: <SERVER_NAME>
+          team: platform
+        annotations:
+          summary: "MCP server {{ $labels.job }} p99 latency > 10s"
+          description: >
+            p99 tool call latency is {{ $value | humanizeDuration }}.
+            Slow adapter queries or upstream API degradation likely.
+          runbook: "https://wiki.internal/runbooks/mcp-high-latency"
+
+      - alert: MCPCriticalLatency
+        # Fires when p99 latency exceeds 30 seconds — approaching LLM timeout threshold.
+        expr: >
+          histogram_quantile(0.99,
+            sum(rate(mcp_tool_call_duration_seconds_bucket{job="<JOB_NAME>"}[5m]))
+            by (le)
+          ) > 30
+        for: 2m
+        labels:
+          severity: critical
+          server: <SERVER_NAME>
+          team: platform
+        annotations:
+          summary: "MCP server {{ $labels.job }} p99 latency > 30s (LLM timeout risk)"
+          description: >
+            p99 latency of {{ $value | humanizeDuration }} will cause LLM agent timeouts.
+            Immediate investigation required.
+          runbook: "https://wiki.internal/runbooks/mcp-high-latency"
+
+  - name: mcp-error-budget
+    # SLO: 99% success rate (1% error budget)
+    # Burn rate alerts fire when the budget is being consumed too fast.
+    rules:
+
+      - alert: MCPErrorBudgetBurn6x
+        # 6x burn rate: 1-hour window. Consuming 6% of weekly budget per hour.
+        # Will exhaust budget in ~28 hours if sustained.
+        expr: >
+          (
+            sum(rate(mcp_tool_calls_total{job="<JOB_NAME>", status="error"}[1h]))
+            /
+            sum(rate(mcp_tool_calls_total{job="<JOB_NAME>"}[1h]))
+          ) > 6 * 0.01
+        for: 5m
+        labels:
+          severity: warning
+          server: <SERVER_NAME>
+          team: platform
+          slo: "99-availability"
+        annotations:
+          summary: "MCP server {{ $labels.job }} burning error budget at 6x rate"
+          description: >
+            1h error rate {{ $value | humanizePercentage }} is 6x the SLO threshold.
+            Error budget will be exhausted in ~28 hours if this continues.
+          runbook: "https://wiki.internal/runbooks/mcp-error-budget"
+
+      - alert: MCPErrorBudgetBurn14x
+        # 14x burn rate: 5-minute window. Consuming 14% of weekly budget per hour.
+        # Will exhaust budget in ~12 hours if sustained.
+        expr: >
+          (
+            sum(rate(mcp_tool_calls_total{job="<JOB_NAME>", status="error"}[5m]))
+            /
+            sum(rate(mcp_tool_calls_total{job="<JOB_NAME>"}[5m]))
+          ) > 14 * 0.01
+        for: 2m
+        labels:
+          severity: critical
+          server: <SERVER_NAME>
+          team: platform
+          slo: "99-availability"
+        annotations:
+          summary: "MCP server {{ $labels.job }} burning error budget at 14x rate"
+          description: >
+            5m error rate {{ $value | humanizePercentage }} is 14x the SLO threshold.
+            Immediate action required — budget exhausts in ~12 hours.
+          runbook: "https://wiki.internal/runbooks/mcp-error-budget"
+
+  - name: mcp-auth
+    rules:
+
+      - alert: MCPAuthFailureSpike
+        # Fires when auth failures increase by more than 10 per minute (5m average).
+        # Baseline is compared against the previous hour to catch sudden spikes.
+        expr: >
+          sum(rate(mcp_auth_failures_total{job="<JOB_NAME>"}[5m])) * 60 > 10
+        for: 3m
+        labels:
+          severity: warning
+          server: <SERVER_NAME>
+          team: platform
+        annotations:
+          summary: "MCP server {{ $labels.job }} auth failure spike"
+          description: >
+            Auth failures at {{ $value | humanize }} per minute (5m avg).
+            Could indicate token expiry, misconfigured clients, or a scanning attempt.
+          runbook: "https://wiki.internal/runbooks/mcp-auth-failures"
+
+      - alert: MCPAuthFailureCritical
+        # Fires when auth failure rate exceeds 50 per minute — likely a security event.
+        expr: >
+          sum(rate(mcp_auth_failures_total{job="<JOB_NAME>"}[5m])) * 60 > 50
+        for: 2m
+        labels:
+          severity: critical
+          server: <SERVER_NAME>
+          team: platform
+          security: "true"
+        annotations:
+          summary: "MCP server {{ $labels.job }} critical auth failure rate"
+          description: >
+            {{ $value | humanize }} auth failures per minute. Possible brute force or
+            misconfigured deployment. Check logs for source IPs and failure reasons.
+          runbook: "https://wiki.internal/runbooks/mcp-auth-failures"

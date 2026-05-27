@@ -1,0 +1,221 @@
+// main.bicep.template — MCP server / app infrastructure template
+// Deploy: az deployment group create \
+//         --resource-group rg-<dept-product>-production \
+//         --template-file infra/main.bicep \
+//         --parameters @infra/parameters.prod.json
+//
+// TODO: Copy this file to infra/main.bicep in your project.
+// TODO: Replace every occurrence of <dept-product> with your repo name (e.g. advertising-amazon).
+// TODO: Replace every occurrence of <acr-name> with your ACR name (alphanumeric, globally unique).
+// TODO: Remove/add secrets in the secrets array to match your app's Key Vault secrets.
+
+// ---------------------------------------------------------------------------
+// Parameters
+// ---------------------------------------------------------------------------
+
+@description('Azure region for all resources')
+param location string = 'eastus'
+
+// TODO: Change default to your ACR name (e.g. acradvertisingamazon)
+@description('Azure Container Registry name (globally unique, alphanumeric only)')
+param acrName string = 'acr<deptproduct>'
+
+@description('Container image tag to deploy')
+param imageTag string = 'latest'
+
+// TODO: Set to your app's subdomain name (e.g. 'myapp' → myapp.gorillacommerce.ai)
+@description('App subdomain for custom domain binding (e.g. myapp)')
+param appSubdomain string = ''
+
+@description('Base DNS zone name')
+param dnsZoneName string = 'gorillacommerce.ai'
+
+@description('Resource group containing the DNS zone')
+param dnsResourceGroup string = 'rg-dns-gorillacommerce'
+
+@description('Environment suffix for DNS (empty for prod, "dev" for dev)')
+param dnsEnvironment string = ''
+
+// TODO: Add app-specific parameters here (e.g. SQL server FQDN, API base URLs)
+// Example:
+// @description('Azure SQL server FQDN')
+// param sqlServerFqdn string
+
+// ---------------------------------------------------------------------------
+// Module: Managed Identity
+// ---------------------------------------------------------------------------
+
+module identity 'modules/managed-identity.bicep' = {
+  name: 'managed-identity'
+  params: {
+    // TODO: Update name to id-<dept-product>
+    name: 'id-<dept-product>'
+    location: location
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Module: Log Analytics
+// ---------------------------------------------------------------------------
+
+module logs 'modules/log-analytics.bicep' = {
+  name: 'log-analytics'
+  params: {
+    // TODO: Update name to log-<dept-product>
+    name: 'log-<dept-product>'
+    location: location
+    retentionDays: 30
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Module: Container Registry
+// ---------------------------------------------------------------------------
+
+module acr 'modules/container-registry.bicep' = {
+  name: 'container-registry'
+  params: {
+    acrName: acrName
+    location: location
+    sku: 'Basic'
+    adminEnabled: false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Module: Key Vault
+// ---------------------------------------------------------------------------
+
+module kv 'modules/key-vault.bicep' = {
+  name: 'key-vault'
+  params: {
+    // TODO: Update name to kv-<dept-product> (3-24 chars)
+    kvName: 'kv-<dept-product>'
+    location: location
+    enableRbac: true
+    softDeleteDays: 7
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Container Apps Environment
+// (Defined inline — no module needed, tightly coupled to log analytics)
+// ---------------------------------------------------------------------------
+
+resource containerAppsEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  // TODO: Update name to cae-<dept-product>
+  name: 'cae-<dept-product>'
+  location: location
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logs.outputs.customerId
+        sharedKey: reference(logs.outputs.workspaceId, '2022-10-01').sharedKeys.primarySharedKey
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Module: Container App
+// ---------------------------------------------------------------------------
+
+module app 'modules/container-app.bicep' = {
+  name: 'container-app'
+  params: {
+    // TODO: Update appName to ca-mcp-<dept-product> (MCP) or ca-<dept-product> (dashboard)
+    appName: 'ca-<dept-product>'
+    location: location
+    envId: containerAppsEnv.id
+    // TODO: Update imageName to <acr-name>.azurecr.io/<dept-product>
+    imageName: '${acrName}.azurecr.io/<dept-product>'
+    imageTag: imageTag
+    acrLoginServer: acr.outputs.loginServer
+    managedIdentityId: identity.outputs.id
+    cpu: '0.5'
+    memory: '1Gi'
+    minReplicas: 1
+    maxReplicas: 3
+    targetPort: 8000
+    healthPath: '/health'
+    readinessPath: '/health/ready'
+    // TODO: Add your non-secret environment variables here
+    envVars: [
+      { name: 'LOG_LEVEL', value: 'INFO' }
+      // { name: 'APP_ENV', value: 'production' }
+    ]
+    // TODO: Add secret refs matching the secrets array below
+    secretRefs: [
+      // { name: 'MY_ENV_VAR', secretRef: 'my-secret-name' }
+    ]
+    // TODO: Replace with your actual Key Vault secret URLs
+    secrets: [
+      // {
+      //   name: 'my-secret-name'
+      //   keyVaultUrl: '${kv.outputs.uri}secrets/my-secret'
+      //   identity: identity.outputs.id
+      // }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// RBAC Role Assignments
+// (Defined inline — depends on outputs from multiple modules)
+// ---------------------------------------------------------------------------
+
+// Grant managed identity permission to pull images from ACR
+resource acrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  // TODO: Keep this as-is — AcrPull is always needed
+  name: guid(acr.outputs.id, identity.outputs.principalId, 'acrPull')
+  scope: resourceGroup()
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d') // AcrPull
+    principalId: identity.outputs.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant managed identity permission to read Key Vault secrets
+resource kvSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  // TODO: Keep this as-is — Key Vault Secrets User is always needed
+  name: guid(kv.outputs.id, identity.outputs.principalId, 'kvSecretsUser')
+  scope: resourceGroup()
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6') // Key Vault Secrets User
+    principalId: identity.outputs.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// TODO: Add additional role assignments as needed, e.g.:
+// - Storage Blob Data Reader for blob access
+// - Azure SQL access via AAD group membership (done at SQL level, not here)
+
+// ---------------------------------------------------------------------------
+// Custom Domain DNS (optional — set appSubdomain to enable)
+// ---------------------------------------------------------------------------
+
+var dnsRecordName = dnsEnvironment == '' ? appSubdomain : '${appSubdomain}.${dnsEnvironment}'
+
+module dnsRecord 'modules/dns-record.bicep' = if (appSubdomain != '') {
+  name: 'dns-record'
+  scope: resourceGroup(dnsResourceGroup)
+  params: {
+    zoneName: dnsZoneName
+    zoneResourceGroup: dnsResourceGroup
+    recordName: dnsRecordName
+    targetFqdn: app.outputs.fqdn
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Outputs
+// ---------------------------------------------------------------------------
+
+output appFqdn string = app.outputs.fqdn
+output acrLoginServer string = acr.outputs.loginServer
+output keyVaultUri string = kv.outputs.uri
+output managedIdentityClientId string = identity.outputs.clientId
+output customDomain string = appSubdomain != '' ? '${dnsRecordName}.${dnsZoneName}' : ''

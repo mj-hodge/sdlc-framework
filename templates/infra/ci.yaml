@@ -1,0 +1,107 @@
+# GitHub Actions CI/CD pipeline for Python (FastAPI) + React (Vite) monorepo.
+#
+# Copy to .github/workflows/ci.yaml
+#
+# Features:
+# - Parallel lint/test/security jobs
+# - PostgreSQL service container for backend tests
+# - uv + npm caching for fast installs
+# - Concurrency control (cancels stale runs)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.10.2"
+      - run: uv sync --frozen
+        working-directory: backend
+      - run: uv run ruff check .
+        working-directory: backend
+      - run: uv run ruff format --check .
+        working-directory: backend
+
+  backend-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test_db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.10.2"
+      - run: uv sync --frozen
+        working-directory: backend
+      - run: uv run pytest --timeout=15 --cov=app --cov-report=xml
+        working-directory: backend
+
+  backend-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.10.2"
+      - run: uv sync --frozen
+        working-directory: backend
+      - run: uv run bandit -r app/ -c pyproject.toml
+        working-directory: backend
+
+  frontend-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run lint
+        working-directory: frontend
+      - run: npx prettier --check .
+        working-directory: frontend
+
+  frontend-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend

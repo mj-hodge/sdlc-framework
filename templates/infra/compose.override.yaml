@@ -1,0 +1,15 @@
+# Development overrides — auto-loaded by docker compose.
+# This file is NOT used in production.
+#
+# Usage: docker compose up (automatically merges compose.yaml + compose.override.yaml)
+# Production: docker compose -f compose.yaml up (skips this file)
+
+services:
+  db:
+    ports:
+      - "5432:5432"  # Expose DB for local tools (pgAdmin, DBeaver)
+
+  backend:
+    environment:
+      DEBUG: "true"
+      JWT_SECRET: "dev-secret-not-for-production"

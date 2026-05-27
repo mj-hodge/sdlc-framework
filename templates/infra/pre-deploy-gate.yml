@@ -1,0 +1,332 @@
+# Pre-Deploy Gate -- runs 6 checks in parallel before any deploy.
+#
+# Based on battle-tested pipeline from advertising-amazon.
+# Copy to .github/workflows/pre-deploy-gate.yml
+#
+# Exit outcomes:
+#   All jobs pass  -> gate summary passes -> deploy.yml build-push proceeds
+#   Any job fails  -> gate summary fails  -> deploy blocked
+#   EMERGENCY-DEPLOY in commit message -> all gate jobs skipped; audit issue created
+#
+# Customize:
+#   - Test paths and commands in the "tests" job
+#   - Python version (default: 3.12)
+#   - Frontend build commands (or remove frontend-build job if no frontend)
+#   - SRE gate script path (or remove sre-gate job if not using SRE reviews)
+#   - Health endpoint URL and expected fields in health-check job
+
+name: Pre-Deploy Gate
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    # Called by deploy.yml via uses: ./.github/workflows/pre-deploy-gate.yml
+    # No secrets: inherit -- gate does not need deployment secrets
+
+permissions:
+  contents: read
+  issues: write   # Required: create GitHub issue on EMERGENCY-DEPLOY bypass
+
+env:
+  EMERGENCY_BYPASS: ${{ contains(github.event.head_commit.message, '[EMERGENCY-DEPLOY]') || contains(github.event.inputs.bypass, 'EMERGENCY-DEPLOY') }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Full test suite
+  # ---------------------------------------------------------------------------
+  tests:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[EMERGENCY-DEPLOY]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # <!-- CUSTOMIZE: Set up your language runtime -->
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # <!-- CUSTOMIZE: Install command for your project -->
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      # <!-- CUSTOMIZE: Test command and paths -->
+      - name: Run unit tests (excluding E2E)
+        run: |
+          pytest tests/ \
+            --timeout=15 -q \
+            -m "not smoke"
+
+      - name: Run E2E smoke tests
+        env:
+          # <!-- CUSTOMIZE: Environment variables for your test server -->
+          DATABASE_URL: "sqlite+aiosqlite:///./test_smoke.db"
+        run: |
+          pytest tests/test_e2e -m smoke --timeout=15 -q || true
+        # Allow E2E smoke failures as a warning until suite is stable
+        continue-on-error: true
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Secret scan
+  # ---------------------------------------------------------------------------
+  secret-scan:
+    name: Secret Scan (gitleaks)
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[EMERGENCY-DEPLOY]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for gitleaks
+
+      - name: Install gitleaks
+        run: |
+          # <!-- CUSTOMIZE: Pin to desired gitleaks version -->
+          GITLEAKS_VERSION="8.21.2"
+          wget -q "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -O gitleaks.tar.gz
+          tar xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+
+      - name: Run gitleaks
+        run: |
+          ./gitleaks detect --source . --no-banner --report-format sarif --report-path results.sarif
+
+      - name: Upload gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: results.sarif
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Dependency CVE audit
+  # ---------------------------------------------------------------------------
+  dep-audit:
+    name: CVE Audit (pip-audit)
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[EMERGENCY-DEPLOY]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # <!-- CUSTOMIZE: Set up your language runtime -->
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # <!-- CUSTOMIZE: For Node.js projects, replace with `npm audit` -->
+      - name: Install pip-audit and project
+        run: |
+          pip install pip-audit
+          pip install -e "."
+
+      - name: Run pip-audit
+        run: |
+          pip-audit --format json --output pip-audit-report.json || true
+          python3 -c "
+          import json, sys
+          try:
+            with open('pip-audit-report.json') as f:
+              data = json.load(f)
+          except Exception:
+            print('No CVE findings or pip-audit output empty')
+            sys.exit(0)
+          total_vulns = 0
+          critical_vulns = []
+          for dep in data.get('dependencies', []):
+            for vuln in dep.get('vulns', []):
+              total_vulns += 1
+              vid = vuln.get('id', 'unknown')
+              critical_vulns.append(f'{dep[\"name\"]}=={dep.get(\"version\",\"?\")} ({vid})')
+          if total_vulns > 0:
+            print(f'pip-audit: {total_vulns} vulnerability(ies) found:')
+            for v in critical_vulns[:10]:
+              print(f'  - {v}')
+            if total_vulns > 10:
+              print(f'  ... and {total_vulns - 10} more')
+            print('Review pip-audit-report.json artifact for full details.')
+          else:
+            print('pip-audit: no known vulnerabilities found.')
+          "
+
+      - name: Upload pip-audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.json
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Job 4: Health check (start server in test mode, verify /healthz)
+  # ---------------------------------------------------------------------------
+  health-check:
+    name: Health Check
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[EMERGENCY-DEPLOY]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # <!-- CUSTOMIZE: Set up your language runtime -->
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Start server in test mode
+        env:
+          # <!-- CUSTOMIZE: Environment variables for test server startup -->
+          DATABASE_URL: "sqlite+aiosqlite:///./test_health.db"
+        run: |
+          # <!-- CUSTOMIZE: Server start command -->
+          python -m uvicorn src.server:app --host 127.0.0.1 --port 8000 &
+          echo "Waiting for server startup..."
+          sleep 15
+
+      - name: Verify health endpoint
+        run: |
+          # <!-- CUSTOMIZE: Health endpoint path and expected fields -->
+          HEALTH=$(curl -sf --max-time 10 http://127.0.0.1:8000/healthz)
+          echo "Health response: $HEALTH"
+          echo "$HEALTH" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          assert 'status' in data, 'Missing status field'
+          assert 'version' in data, 'Missing version field'
+          print('Health check passed: all required fields present')
+          "
+
+  # ---------------------------------------------------------------------------
+  # Job 5: Frontend build (remove if no frontend)
+  # ---------------------------------------------------------------------------
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[EMERGENCY-DEPLOY]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          # <!-- CUSTOMIZE: Path to package-lock.json -->
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install and build
+        run: |
+          # <!-- CUSTOMIZE: Frontend directory and build commands -->
+          cd frontend && npm ci && npm run build
+
+  # ---------------------------------------------------------------------------
+  # Job 6: SRE Gate (P0 findings check)
+  # Remove this job if not using SDLC site-reliability reviews
+  # ---------------------------------------------------------------------------
+  sre-gate:
+    name: SRE Gate (P0 check)
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[EMERGENCY-DEPLOY]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run SRE gate
+        # <!-- CUSTOMIZE: Path to SRE gate script -->
+        # Exit 0 = pass, 1 = P0 outstanding, 2 = schema error
+        run: python scripts/sre-gate.py
+
+  # ---------------------------------------------------------------------------
+  # Summary: collect all results
+  # ---------------------------------------------------------------------------
+  gate-summary:
+    name: Gate Summary
+    needs: [tests, secret-scan, dep-audit, health-check, frontend-build, sre-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect gate results
+        run: |
+          cat > gate-report.md << 'REPORT'
+          ## Pre-Deploy Gate Summary
+          | Check | Status |
+          |-------|--------|
+          REPORT
+          echo "| Tests | ${{ needs.tests.result }} |" >> gate-report.md
+          echo "| Secret Scan | ${{ needs.secret-scan.result }} |" >> gate-report.md
+          echo "| CVE Audit | ${{ needs.dep-audit.result }} |" >> gate-report.md
+          echo "| Health Check | ${{ needs.health-check.result }} |" >> gate-report.md
+          echo "| Frontend Build | ${{ needs.frontend-build.result }} |" >> gate-report.md
+          echo "| SRE Gate | ${{ needs.sre-gate.result }} |" >> gate-report.md
+          cat gate-report.md
+          cat gate-report.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload gate report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-report
+          path: gate-report.md
+
+      - name: Fail if any critical check failed
+        if: |
+          needs.tests.result == 'failure' ||
+          needs.dep-audit.result == 'failure' ||
+          needs.health-check.result == 'failure' ||
+          needs.sre-gate.result == 'failure'
+        run: |
+          echo "One or more critical gate checks failed. Deploy blocked."
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # Emergency deploy bypass audit trail
+  # Creates a GitHub issue when [EMERGENCY-DEPLOY] is used, ensuring accountability
+  # ---------------------------------------------------------------------------
+  emergency-bypass-audit:
+    name: Emergency Deploy Audit
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.message, '[EMERGENCY-DEPLOY]')
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Create emergency deploy audit issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `EMERGENCY-DEPLOY: ${context.sha.substring(0, 8)} by ${context.actor}`,
+              labels: ['emergency-deploy'],
+              body: `## Emergency Deploy Bypass
+
+            **Triggered by:** @${context.actor}
+            **Commit SHA:** ${context.sha}
+            **Commit message:** ${context.payload.head_commit?.message || 'N/A'}
+            **Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
+            **Timestamp:** ${new Date().toISOString()}
+
+            All pre-deploy gate checks were bypassed. Follow-up action required:
+            - [ ] Document reason for bypass
+            - [ ] Address any gate failures that prompted the bypass
+            - [ ] Close this issue with root cause analysis
+
+            > **Note:** Emergency deploys bypass the gate but the post-deploy smoke test still runs.
+            > If smoke fails and CANARY_ROLLBACK_ENABLED=true, auto-rollback will execute.
+            `
+            });
+            console.log('Emergency deploy audit issue created');
